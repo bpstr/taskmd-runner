@@ -1,3 +1,8 @@
 __pycache__/
 .venv/
 .taskmd-runner/
+node_modules/
+dist/
+*.tgz
+.codanna/
+.codannaignore

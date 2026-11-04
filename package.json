@@ -1,0 +1,58 @@
+{
+  "name": "@bpstr/taskmd-runner",
+  "version": "0.1.0",
+  "description": "Sequential taskmd execution through coding-agent CLI clients",
+  "type": "module",
+  "bin": {
+    "taskmd-runner": "bin/taskmd-runner.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "src",
+    "WORKER.md",
+    "result.schema.json",
+    "README.md",
+    "taskmd_runner.py",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "npm run build && node --test tests/*.test.mjs",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "@bpstr/agent-adapter": "0.1.0",
+    "fs-ext": "2.1.1",
+    "yaml": "2.9.1"
+  },
+  "devDependencies": {
+    "@types/fs-ext": "2.0.3",
+    "@types/node": "22.19.15",
+    "typescript": "5.9.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bpstr/taskmd-runner.git"
+  },
+  "homepage": "https://github.com/bpstr/taskmd-runner#readme",
+  "bugs": {
+    "url": "https://github.com/bpstr/taskmd-runner/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "keywords": [
+    "taskmd",
+    "typescript",
+    "cli",
+    "coding-agent",
+    "codex",
+    "claude",
+    "grok"
+  ]
+}

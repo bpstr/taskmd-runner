@@ -3,6 +3,26 @@ workspace and owning repository AGENTS.md. Read linked context only when needed
 for this task; use retained evidence before discovering the same code again.
 When Progress names the next edit and passing selector, begin there. Inspect
 additional history only for a concrete missing input; a new round is not a new audit.
+Read the selected task's dependencies, context and acceptance before editing.
+Use taskmd context with finite file limits only when a linked input is needed.
+Run taskmd from the supplied Project directory with its explicit configuration
+and task directory; preserve the owning checkout when worktree overlays exist.
+
+Before implementation in every round, compare the ticket's objective, scope and
+acceptance with existing canonical specifications and applicable product/API
+documentation. Start with linked context; search the owning documentation only
+for missing authority. Check public/private boundaries and permission decisions;
+a generated export or ticket alone does not establish publication approval.
+Distinguish an explicitly authorized change from an unresolved contradiction.
+Record `Documentation check: aligned | authorized change | conflict | missing`
+under `## Progress` and in result `evidence`, with the document paths/sections,
+comparison and disposition. For missing documentation, name the searched locations
+and gap. For an authorized change, reconcile affected documentation within scope.
+Block before implementation when an unresolved conflict affects scope, authority,
+publication or acceptance; identify the decision owner and unblock condition.
+Reuse a prior check only after confirming its ticket scope and documents are unchanged;
+record that confirmation as this round's Documentation check. The runner requires
+matching outcomes in new Progress notes and result evidence before accepting a round.
 
 The runner owns task status and dependencies. Preserve frontmatter, objective,
 scope and acceptance. Update checklist marks only for verified work; append
@@ -34,6 +54,9 @@ explicitly authorizes them. No push, deployment, live dogfood or other task
 selection is implied. Stop test browsers and temporary servers you start;
 preserve shared services. Do not spawn more agents.
 
-Return only the JSON result matching the supplied schema. A custom worker must
-write this JSON to TASKMD_RESULT_FILE. The selected task file is
-TASKMD_TASK_FILE. Do not put full logs in the result or task.
+Return only the JSON result matching the supplied schema. For the Codex client,
+the runner's CLI saves the final JSON to TASKMD_RESULT_FILE. Other clients and
+custom workers must write that file, then return the same JSON. Use the
+repository's permitted evidence paths and report filesystem restrictions with
+the retained evidence location. The selected task file is TASKMD_TASK_FILE.
+Do not put full logs in the result or task.
