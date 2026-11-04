@@ -1,4 +1,47 @@
-# TypeScript migration validation
+# Runner validation
+
+## Git synchronization and Node-only runtime
+
+This batch adds optional Git synchronization at task boundaries, a separately
+opted-in conflict worker, and removes the forwarding launcher and native lock
+addon. The lock now uses proper-lockfile 4.1.2 (MIT, pure JavaScript), with a
+30-second stale lease and 10-second heartbeat. Earlier flock interoperability
+and Node native-addon qualification below describe version 0.1.0 only.
+
+Changed boundaries: CLI options, shared worker invocation, pre-claim sync,
+post-validation publication/error handling, process interruption and exclusion.
+Use local bare Git remotes and prepared worker processes for new checks:
+fetch between rounds; multiple selected repositories; dirty/detached/untracked
+operation rejection; conflict stop/resolution/scope protection; rejected/racing
+pushes; task-status preservation; lease contention, stale recovery and SIGTERM.
+Compile once after the coherent implementation batch and select the existing
+custom/adapter launch and interruption/lock cases. Retain the earlier unaffected
+selection, Markdown validation, documentation evidence and notification results.
+Expected cost: under two minutes per selected lane; no live clients or inference.
+
+Completion requires these selected checks, a tarball with no Python files or
+native install scripts, and clean installation/entry-point execution with Python
+absent from PATH. Run no Assign application suite or full runner suite: the
+affected selectors cover the changed boundaries and earlier evidence remains.
+
+Results: 23 Git/lease checks passed across the initial lane and affected follow-up
+selectors; the first detached-HEAD assertion expected Git's subcommand name
+rather than its error text. Only that assertion was corrected and rerun. Ten
+existing worker/client, cap, worklog, interruption, lock and CLI cases passed.
+Five scoped checks cover the concurrent task-prefix/identifier changes in the
+shared controller, including redirected symlink rejection. Zero failures remain;
+all selected lanes report zero skips. No full suite or live model ran here.
+
+The packed 0.2.0 candidate installed and executed version, help and an empty
+real-taskmd queue with only Node/npm on PATH (both Python commands absent).
+The dependency lock contains no native addon or installation script. This proof
+is retained for the final artifact's unchanged dependency/install/entrypoint
+closure; the later Git handoff guard is separately checked by a prepared
+publication conflict that attempts to discard the accepted Progress journal.
+Tarball hashes, file comparisons and complete logs remain under the local
+`.taskmd-runner/release-0.2.0` evidence directory.
+
+## TypeScript migration (0.1.0 historical evidence)
 
 The entire execution runtime changes from Python to TypeScript. The initial
 runner regression suite is required because selection, transitions, subprocesses,

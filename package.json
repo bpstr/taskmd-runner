@@ -1,6 +1,6 @@
 {
   "name": "@bpstr/taskmd-runner",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Sequential taskmd execution through coding-agent CLI clients",
   "type": "module",
   "bin": {
@@ -14,9 +14,9 @@
     "dist",
     "src",
     "WORKER.md",
+    "GIT_WORKER.md",
     "result.schema.json",
     "README.md",
-    "taskmd_runner.py",
     "CHANGELOG.md"
   ],
   "scripts": {
@@ -26,12 +26,12 @@
   },
   "dependencies": {
     "@bpstr/agent-adapter": "0.1.0",
-    "fs-ext": "2.1.1",
+    "proper-lockfile": "4.1.2",
     "yaml": "2.9.1"
   },
   "devDependencies": {
-    "@types/fs-ext": "2.0.3",
     "@types/node": "22.19.15",
+    "@types/proper-lockfile": "4.1.4",
     "typescript": "5.9.3"
   },
   "repository": {

@@ -11,6 +11,7 @@ Select pending taskmd work, claim it, run one worker, validate and repeat.
   --client NAME          ${CLIENT_NAMES.join(', ')} (default codex)
   --rounds N             Maximum worker rounds; 0 drains ready work (default 0)
   --filter EXPR          Repeatable taskmd filter
+  --task-prefix PATH     Allow a task-directory subtree; repeat for alternatives
   --timeout SECONDS      Per-worker timeout (default 1800)
   --model NAME           Codex default gpt-6.1-sol; other clients inherit configuration
   --effort LEVEL         Codex default medium; other clients inherit configuration
@@ -21,6 +22,9 @@ Select pending taskmd work, claim it, run one worker, validate and repeat.
   --config PATH          Project config override
   --task-dir PATH        Task directory override
   --state-dir PATH       Evidence directory override
+  --git-sync             Fetch/merge before tasks; commit/push valid rounds
+  --git-repo PATH        Repeatable repository path (default project checkout)
+  --git-conflicts MODE   stop (default) or worker for a dedicated resolver
   --notify POLICY       attention (default) or off
   --notify-on EVENT      Additional alert; repeatable or comma-separated:
                         ${notificationEvents.join(', ')}
@@ -28,18 +32,22 @@ Select pending taskmd work, claim it, run one worker, validate and repeat.
   notifications request-permission   macOS notification setup
 `;
 export function parseArgs(argv: string[]): Options {
-  const options: Options = { project: '', taskmd: 'taskmd', filter: [], rounds: 0, timeout: 1800, client: 'codex', sandbox: 'workspace-write', permissions: 'default', notify: 'attention', notifyOn: [] };
+  const options: Options = { project: '', taskmd: 'taskmd', filter: [], rounds: 0, timeout: 1800, client: 'codex', sandbox: 'workspace-write', permissions: 'default', notify: 'attention', notifyOn: [], gitSync: false, gitRepo: [], gitConflicts: 'stop' };
   const strings: Record<string, keyof Options> = { '--project': 'project', '--config': 'config', '--task-dir': 'taskDir', '--state-dir': 'stateDir', '--taskmd': 'taskmd', '--model': 'model', '--effort': 'effort', '--client': 'client', '--sandbox': 'sandbox', '--executable': 'executable', '--permissions': 'permissions', '--notify': 'notify' };
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
     if (flag === '--worker') { options.worker = argv.slice(i + 1); if (!options.worker.length) throw new Error('--worker must be nonempty'); break; }
+    if (flag === '--git-sync') { options.gitSync = true; continue; }
     const value = argv[++i];
     if (value === undefined) throw new Error(`Missing value for ${flag}`);
     if (strings[flag]) Object.assign(options, { [strings[flag]]: value });
     else if (flag === '--filter') options.filter.push(value);
+    else if (flag === '--task-prefix') (options.taskPrefix ??= []).push(value);
     else if (flag === '--rounds') options.rounds = Number(value);
     else if (flag === '--timeout') options.timeout = Number(value);
     else if (flag === '--notify-on') options.notifyOn.push(...value.split(',') as NotificationEvent[]);
+    else if (flag === '--git-repo') options.gitRepo.push(value);
+    else if (flag === '--git-conflicts') options.gitConflicts = value as Options['gitConflicts'];
     else throw new Error(`Unknown option: ${flag}`);
   }
   if (!options.project) throw new Error('--project is required');
@@ -49,6 +57,8 @@ export function parseArgs(argv: string[]): Options {
   if (!['workspace-write', 'danger-full-access'].includes(options.sandbox)) throw new Error('Invalid sandbox');
   if (!['default', 'bypass'].includes(options.permissions)) throw new Error('Invalid permissions');
   if (!['attention', 'off'].includes(options.notify)) throw new Error('Invalid notification policy');
+  if (!['stop', 'worker'].includes(options.gitConflicts)) throw new Error('Invalid Git conflict policy');
+  if (!options.gitSync && (options.gitRepo.length || options.gitConflicts === 'worker')) throw new Error('--git-repo and --git-conflicts worker require --git-sync');
   if (options.notifyOn.some(event => !notificationEvents.includes(event))) throw new Error('Unknown notification event');
   if (options.client === 'codex') {
     options.model ??= 'gpt-6.1-sol';

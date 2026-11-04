@@ -6,7 +6,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { parse, stringify } from 'yaml';
-import { flockSync } from 'fs-ext';
+import { acquireTaskLock } from '../dist/lock.js';
 import { taskContext, readTask } from '../dist/task.js';
 import { parseArgs } from '../dist/cli.js';
 import { Notifications } from '../dist/notifications.js';
@@ -25,8 +25,9 @@ function fixture(t, config = '') {
   fs.writeFileSync(path.join(root, 'README.md'), '# Prepared fixture contract\n\nDeliver only the selected fixture.\n');
   return root;
 }
-function task(root, id, { priority = 'medium', dependencies = [], status = 'pending' } = {}) {
-  const file = path.join(root, 'tasks', id + '-task.md');
+function task(root, id, { priority = 'medium', dependencies = [], status = 'pending', directory = '' } = {}) {
+  fs.mkdirSync(path.join(root, 'tasks', directory), { recursive: true });
+  const file = path.join(root, 'tasks', directory, id + '-task.md');
   fs.writeFileSync(file, '---\n' + stringify({ id, title: 'Task ' + id, status, priority, dependencies }) + '---\n# Task\n\n- [ ] Deliver the fixture\n');
   return file;
 }
@@ -95,10 +96,10 @@ test('invalid dependency fails before claim', async t => {
   const root = fixture(t); const file = task(root, '001', { dependencies: ['missing'] }); const r = await run(root);
   assert.equal(r.code, 1); assert.equal(r.summary, undefined); assert.equal(readTask(file).meta.status, 'pending');
 });
-test('shares the original Python advisory lock', async t => {
-  const root = fixture(t); task(root, '001'); const fd = fs.openSync(path.join(root, 'tasks/.taskmd-runner.lock'), 'a+');
-  try { flockSync(fd, 'exnb'); const r = await run(root); assert.equal(r.code, 1); assert.match(r.stderr, /Another runner/); }
-  finally { fs.closeSync(fd); }
+test('rejects a competing Node lease owner', async t => {
+  const root = fixture(t); task(root, '001'); const release = await acquireTaskLock(path.join(root, 'tasks'), () => {});
+  try { const r = await run(root); assert.equal(r.code, 1); assert.match(r.stderr, /Another runner/); }
+  finally { await release(); }
 });
 test('PR-review ends in review with a linked PR', async t => {
   const root = fixture(t, 'workflow: pr-review\n'); task(root, '001'); const r = await run(root, 'in-review');
@@ -162,14 +163,59 @@ test('SIGTERM blocks the claimed task, reaps the worker and releases the lock', 
     assert.throws(() => process.kill(workerPid, 0), /ESRCH/); assert.equal(readTask(file).meta.status, 'blocked');
     const final = stdout.trim().split('\n').map(line => JSON.parse(line)).find(event => event.summary);
     assert.equal(JSON.parse(fs.readFileSync(final.summary)).reason, 'interrupted');
-    const fd = fs.openSync(path.join(root, 'tasks/.taskmd-runner.lock'), 'a+');
-    try { flockSync(fd, 'exnb'); } finally { fs.closeSync(fd); }
+    const release = await acquireTaskLock(path.join(root, 'tasks'), () => {}); await release();
   } finally { if (child.exitCode === null && child.signalCode === null) { child.kill('SIGTERM'); await closed; } }
 });
-test('CRLF frontmatter reads like the original Python universal-newline reader', t => {
+test('CRLF frontmatter reads like LF frontmatter', t => {
   const root = fixture(t); const file = task(root, '001'); const original = readTask(file);
   fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replaceAll('\n', '\r\n'));
   assert.deepEqual(readTask(file), original);
+});
+
+test('task identifiers retain leading zeros and precision without changing other scalar types', t => {
+  const root = fixture(t); const file = task(root, '084');
+  fs.writeFileSync(file, '---\nid: 084\ntitle: Prepared identity\nparent: 009\ndependencies: [003, 9223372036854775807]\nweight: 3\nenabled: false\n---\n# Task\n');
+  const { meta } = readTask(file);
+  assert.equal(meta.id, '084'); assert.equal(meta.parent, '009');
+  assert.deepEqual(meta.dependencies, ['003', '9223372036854775807']);
+  assert.equal(meta.weight, 3); assert.equal(meta.enabled, false);
+});
+test('leading-zero identifier survives real taskmd rewrites and native worklog handoff', async t => {
+  const root = fixture(t, 'worklogs: true\n'); const file = task(root, '084');
+  const r = await run(root, 'completed', ['--rounds', '1']);
+  assert.equal(r.code, 0, r.stderr); assert.equal(r.summary.rounds[0].task_id, '084');
+  assert.equal(readTask(file).meta.id, '084'); assert.equal(readTask(file).meta.status, 'completed');
+  assert.ok(fs.existsSync(path.join(root, 'tasks/.worklogs/084.md')));
+});
+test('task prefixes select API or Astro while preserving excluded prerequisites', async t => {
+  const root = fixture(t);
+  const desktop = task(root, '001', { directory: 'desktop', priority: 'critical' });
+  task(root, '002', { directory: 'api/documentation', priority: 'high' });
+  task(root, '003', { directory: 'astro/detail', priority: 'medium' });
+  const mobile = task(root, '004', { directory: 'mobile', priority: 'critical' });
+  const dependent = task(root, '005', { directory: 'api/producers', priority: 'critical', dependencies: ['001'] });
+  const sibling = task(root, '006', { directory: 'api-other', priority: 'critical' });
+  const r = await run(root, 'completed', ['--task-prefix', 'api', '--task-prefix', 'astro', '--rounds', '2']);
+  assert.equal(r.code, 0, r.stderr); assert.deepEqual(r.summary.rounds.map(row => row.task_id), ['002', '003']);
+  assert.ok(r.summary.rounds.every(row => /^(api|astro)\//.test(row.task_path)));
+  for (const file of [desktop, mobile, dependent, sibling]) assert.equal(readTask(file).meta.status, 'pending');
+});
+test('task prefixes reject a symlink that redirects API scope to Desktop', async t => {
+  const root = fixture(t); const file = task(root, '001', { directory: 'desktop', priority: 'critical' });
+  fs.symlinkSync(path.join(root, 'tasks/desktop'), path.join(root, 'tasks/api'), 'dir');
+  const r = await run(root, 'exit', ['--task-prefix', 'api']);
+  assert.equal(r.code, 1); assert.match(r.stderr, /prefix cannot redirect through a symlink/);
+  assert.equal(r.summary, undefined); assert.equal(readTask(file).meta.status, 'pending');
+});
+test('task prefixes distinguish a blocked selection from an empty scoped backlog', async t => {
+  const blocked = fixture(t); task(blocked, '001', { directory: 'desktop' });
+  task(blocked, '002', { directory: 'api', dependencies: ['001'] });
+  const r = await run(blocked, 'exit', ['--task-prefix', 'api', '--task-prefix', 'astro']);
+  assert.equal(r.code, 2, r.stderr); assert.equal(r.summary.reason, 'no_ready_tasks'); assert.equal(r.summary.rounds.length, 0);
+  const empty = fixture(t); task(empty, '001', { directory: 'desktop' });
+  task(empty, '002', { directory: 'api', status: 'completed' });
+  const drained = await run(empty, 'exit', ['--task-prefix', 'api', '--task-prefix', 'astro']);
+  assert.equal(drained.code, 0, drained.stderr); assert.equal(drained.summary.reason, 'empty'); assert.equal(drained.summary.rounds.length, 0);
 });
 test('taskmd transport preserves UTF-8 characters split across pipe chunks', async () => {
   const text = await command(process.execPath, ['-e', 'const b=Buffer.from("árvíztűrő");process.stdout.write(b.subarray(0,1));setTimeout(()=>process.stdout.end(b.subarray(1)),20)'], { cwd: ROOT });

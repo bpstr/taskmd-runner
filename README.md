@@ -7,9 +7,9 @@ queue has no ready work. It never polls an empty queue or retries failed workers
 Requires Node.js 20+, taskmd 0.8.0 and a configured coding-agent CLI. Supports
 Codex, Claude, Gemini, Grok, Kimi and Muse through the public
 [@bpstr/agent-adapter](https://www.npmjs.com/package/@bpstr/agent-adapter) package.
-macOS and Linux are supported; advisory locking uses the native `fs-ext` addon
-and may require a C++ build toolchain when installing. Install/build and execute
-with the same Node major version; after changing Node versions, rebuild `fs-ext`.
+macOS and Linux are supported. The runner and its npm dependencies use Node.js;
+installation requires no Python, native addon or C++ build toolchain. Optional
+Git synchronization also requires Git and configured repository credentials.
 
 Install the published CLI:
 
@@ -30,6 +30,12 @@ node bin/taskmd-runner.js --project /path/to/project --client claude --rounds 3 
 The project supplies `.taskmd.yaml`, task files and repository instructions.
 `--rounds 0` (the default) drains ready work. Filters are repeatable and passed
 directly to taskmd. Strict priority ordering preserves phase and dependency gates.
+Use repeatable `--task-prefix` options to select task-directory subtrees, for example
+`--task-prefix api --task-prefix astro`. Prefixes are alternatives; normal taskmd
+filters still apply. Selection retains native ordering and the full dependency graph;
+tasks in other directories are never claimed. A scoped search expands up to 4,096
+ranked candidates and fails for review if that bound is exhausted. Recheck the
+owning checkout at claim time; symlinks cannot widen an allowed subtree.
 The default Codex sandbox is `workspace-write`; select `danger-full-access` only
 in an environment where the task already authorizes that access. Model and effort
 default to `gpt-6.1-sol` and `medium` for Codex; explicit flags override them.
@@ -85,6 +91,55 @@ in-progress/blocked tasks require explicit operator reconciliation. Each physica
 task directory has an advisory process lock; coordinate other tools and worktrees
 through their existing owners. A taskmd failure is an error, never an empty queue.
 
+## Git synchronization
+
+Opt in for a repository with a configured tracking branch:
+
+```sh
+taskmd-runner --project /path/to/repo --rounds 3 --git-sync
+```
+
+Each round fetches and integrates upstream before selecting or claiming a task.
+After a valid worker handoff, the controller commits changed files and the final
+task state, then pushes to the configured upstream branch. Verified partial or
+blocked handoffs also checkpoint their progress. Existing local commits on the
+selected branch are included in the push. Failed or invalid workers leave their
+changes for inspection.
+
+For a workspace with separate repositories, list every checkout the selected
+work may change, including the task directory's owning repository:
+
+```sh
+taskmd-runner --project /path/to/workspace --rounds 3 --git-sync \
+  --git-repo assign-core --git-repo tasks --git-conflicts worker
+```
+
+Use clean, dedicated checkouts on attached branches with configured upstreams
+and author identity. The controller checks all selected repositories before
+syncing. It preserves an unfinished Git operation and stops for reconciliation.
+Keep `.taskmd-runner/` ignored or store evidence outside the repositories.
+If synchronization changes the runner configuration, restart so the controller
+can acquire the correct task-directory lease and workflow settings.
+
+Conflicts stop the runner by default. `--git-conflicts worker` starts one
+dedicated session using the selected client, model, permissions and timeout.
+That worker edits only the supplied conflicted files. The controller checks the
+resolution and stages, commits and pushes it. Conflict sessions have separate
+receipts under `git-conflicts/`; they do not consume task `--rounds`. There is at
+most one resolver per repository at each pre-task or publication boundary.
+Custom workers receive `TASKMD_WORKER_ROLE=git-conflict` and the repository in
+`TASKMD_GIT_REPOSITORY`; their stdin contains the scoped resolution instructions.
+
+Synchronization errors exit with `git_sync_error` and stop further task workers.
+A failed push preserves local commits and completed task status. If upstream
+advanced during a worker, the controller fetches, integrates it and retries the
+push once. A multi-repository failure can leave some repositories already pushed;
+`git-sync.json` and the summary identify each completed step. Merges and local
+changes remain available for recovery. The controller never force-pushes,
+stashes, resets, or switches branches.
+
+## Worker commands and locking
+
 Custom workers use an argument vector without a shell:
 
 ```sh
@@ -113,8 +168,12 @@ and task identifiers, not worker output. On macOS, request authorization with:
 node bin/taskmd-runner.js notifications request-permission
 ```
 
-`taskmd_runner.py` remains a standard-library-only forwarding entry point for
-existing commands; execution is entirely TypeScript/Node. Build before using it.
+Exclusive ownership uses a Node lease at `tasks/.taskmd-runner.lease`, refreshed
+every 10 seconds. A hard-crashed owner's lease becomes recoverable after 30
+seconds; normal exit and interruption release it immediately. Stop older 0.1.x
+or Python runners before upgrading: their advisory file lock does not coordinate
+with this lease. The Python forwarding launcher has been removed; use
+`taskmd-runner` or `node bin/taskmd-runner.js`.
 
 Built against the [taskmd 0.8 quick start](https://driangle.github.io/taskmd/getting-started/),
 the original [do-task](https://github.com/driangle/taskmd/blob/main/claude-code-plugin/skills/do-task/SKILL.md),

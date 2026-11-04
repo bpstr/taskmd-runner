@@ -9,13 +9,16 @@ import { runAgent, buildRunnerInvocation, type ClientName, type Usage } from '@b
 import { command } from './process.js';
 import { readTask, contract, checks, verifiedCount, progress, taskContext, now } from './task.js';
 import { Notifications, type NotificationOptions } from './notifications.js';
+import { GitSync, type GitConflict } from './git.js';
+import { acquireTaskLock, taskLease } from './lock.js';
 
 const HERE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export interface Options extends NotificationOptions {
   project: string; config?: string; taskDir?: string; stateDir?: string; taskmd: string;
-  filter: string[]; rounds: number; timeout: number; client: ClientName; executable?: string;
+  filter: string[]; taskPrefix?: string[]; rounds: number; timeout: number; client: ClientName; executable?: string;
   sandbox: 'workspace-write' | 'danger-full-access'; permissions: 'default' | 'bypass';
   model?: string; effort?: string; worker?: string[];
+  gitSync: boolean; gitRepo: string[]; gitConflicts: 'stop' | 'worker';
 }
 export interface WorkerResult {
   status: 'pending' | 'blocked' | 'completed' | 'in-review';
@@ -45,11 +48,26 @@ export class Runner {
   root: string; config: string; tasks: string; workflow: string; worklogs: boolean;
   base: string[]; filters: string[]; runDir: string; rows: Record<string, any>[] = [];
   notifications: Notifications;
+  taskPrefixes: string[];
+  gitSync?: GitSync;
+  private lockError?: string;
+  private configText: string;
   constructor(public args: Options, private signal?: AbortSignal) {
     this.root = fs.realpathSync(path.resolve(args.project));
     this.config = args.config ? path.resolve(args.config) : path.join(this.root, '.taskmd.yaml');
-    const config = parse(fs.readFileSync(this.config, 'utf8')) || {};
+    this.configText = fs.readFileSync(this.config, 'utf8');
+    const config = parse(this.configText) || {};
     this.tasks = fs.realpathSync(path.resolve(this.root, args.taskDir || config.dir || 'tasks'));
+    this.taskPrefixes = (args.taskPrefix || []).map(prefix => {
+      if (!prefix || path.isAbsolute(prefix)) throw new Error('Task prefix must be a relative subtree');
+      const resolved = path.resolve(this.tasks, prefix);
+      const target = fs.existsSync(resolved) ? fs.realpathSync(resolved) : resolved;
+      if (target !== resolved) throw new Error('Task prefix cannot redirect through a symlink');
+      const relative = path.relative(this.tasks, target);
+      if (!relative || relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative))
+        throw new Error('Task prefix must stay below the task directory');
+      return target;
+    });
     this.workflow = config.workflow || 'solo'; this.worklogs = config.worklogs === true;
     if (!['solo', 'pr-review'].includes(this.workflow)) throw new Error(`Unsupported workflow: ${this.workflow}`);
     this.base = ['--config', this.config, '--task-dir', this.tasks, '--no-color'];
@@ -62,6 +80,28 @@ export class Runner {
     return command(this.args.taskmd, [...this.base, ...args], { cwd: this.root, timeoutMs: 60000 });
   }
   async cliJson(...args: string[]): Promise<any> { return JSON.parse(await this.cli(...args)); }
+  inScope(task: Record<string, any>): boolean {
+    if (!this.taskPrefixes.length) return true;
+    if (typeof task.file_path !== 'string') throw new Error('Scoped task selection requires a file_path');
+    const within = (file: string) => this.taskPrefixes.some(prefix => {
+      const relative = path.relative(prefix, file);
+      return !relative || (relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative));
+    });
+    const file = path.resolve(this.tasks, task.file_path);
+    return within(file) && within(fs.realpathSync(file));
+  }
+  async nextTasks(): Promise<Record<string, any>[]> {
+    // Preserve taskmd's native phase/priority/dependency order; stop expanding
+    // as soon as an allowed candidate appears. The search is always bounded.
+    for (let limit = this.taskPrefixes.length ? 64 : 1; limit <= 4096; limit *= 4) {
+      const rows = await this.cliJson('next', '--format', 'json', '--strict-priority', '--limit', String(limit), '--filter', 'status=pending', ...this.filters);
+      if (!Array.isArray(rows)) throw new Error('Unexpected taskmd next response; not an empty backlog');
+      const candidate = rows.find(task => this.inScope(task));
+      if (candidate) return [candidate];
+      if (!this.taskPrefixes.length || rows.length < limit) return [];
+    }
+    throw new Error('Scoped selection reached 4096 candidates; narrow the taskmd filters');
+  }
   async status(id: string, status: string) { await this.cli('set', id, '--status', status); }
   async record(file: string, message: string, handoff = false, workerNotes = '') {
     if (!this.worklogs) { progress(file, message); return; }
@@ -76,7 +116,7 @@ export class Runner {
     fs.writeFileSync(file, scope.trimEnd() + '\n\n## Progress\n\n' + slices.join('\n') + `\n\n${now()} — ${message}\n\n${history}\n`);
   }
   async finish(reason: string, code: number): Promise<number> {
-    jsonFile(path.join(this.runDir, 'summary.json'), { reason, exit_code: code, client: this.args.client, rounds: this.rows, ended_at: now() });
+    jsonFile(path.join(this.runDir, 'summary.json'), { reason, exit_code: code, client: this.args.client, rounds: this.rows, ...(this.gitSync ? { git_sync: this.gitSync.state() } : {}), ...(this.lockError ? { lock_error: this.lockError } : {}), ended_at: now() });
     console.log(JSON.stringify({ reason, rounds: this.rows.length, summary: path.join(this.runDir, 'summary.json') }));
     await this.notifications.sendForReason(reason, this.root, this.rows.at(-1)?.task_id);
     return code;
@@ -85,17 +125,31 @@ export class Runner {
     const resultFile = path.join(folder, 'result.json');
     const prompt = fs.readFileSync(path.join(HERE, 'WORKER.md'), 'utf8') +
       `\nProject: ${this.root}\nWorkflow: ${this.workflow}\nClient: ${this.args.worker ? 'custom' : this.args.client}\nTask file: ${file}\nResult file: ${resultFile}\n` +
+      (this.gitSync ? `\nGit sync is enabled. The controller owns commits, pushes and merges in these checkouts: ${this.gitSync.repositories.map(repo => repo.path).join(', ')}. Leave Git history, branch and index unchanged; edit task-owned working files only.\n` : '') +
       `\nResult schema:\n${fs.readFileSync(path.join(HERE, 'result.schema.json'), 'utf8')}\nSelected task:\n${taskContext(file)}`;
+    return this.invokeWorker(prompt, folder, this.root, { TASKMD_TASK_FILE: file, TASKMD_WORKER_ROLE: 'task' });
+  }
+  async conflictWorker(conflict: GitConflict) {
+    const prompt = fs.readFileSync(path.join(HERE, 'GIT_WORKER.md'), 'utf8') +
+      `\nRepository: ${conflict.repository}\nSync phase: ${conflict.phase}\nConflict paths (JSON): ${JSON.stringify(conflict.files)}\n` +
+      `Result file: ${path.join(conflict.folder, 'result.json')}\nResult schema:\n${fs.readFileSync(path.join(HERE, 'result.schema.json'), 'utf8')}`;
+    const output = await this.invokeWorker(prompt, conflict.folder, conflict.repository,
+      { TASKMD_WORKER_ROLE: 'git-conflict', TASKMD_TASK_FILE: '', TASKMD_GIT_REPOSITORY: conflict.repository });
+    jsonFile(path.join(conflict.folder, 'receipt.json'), output);
+    if (output.result.status !== 'completed' || !output.result.evidence.length) throw new Error(`Git conflict worker did not complete a verified resolution; inspect ${conflict.folder}`);
+  }
+  private async invokeWorker(prompt: string, folder: string, cwd: string, extraEnv: NodeJS.ProcessEnv) {
+    const resultFile = path.join(folder, 'result.json');
     fs.writeFileSync(path.join(folder, 'prompt.md'), prompt);
-    const env = { ...process.env, TASKMD_TASK_FILE: file, TASKMD_RESULT_FILE: resultFile, TASKMD_ROUND_DIR: folder, ASSIGN_OFFLINE_TESTS: '1' };
+    const env = { ...process.env, ...extraEnv, TASKMD_RESULT_FILE: resultFile, TASKMD_ROUND_DIR: folder, ASSIGN_OFFLINE_TESTS: '1' };
     const log = fs.createWriteStream(path.join(folder, 'worker.jsonl'));
     const started = performance.now(); let usage: Usage | Record<string, number> | null = null;
     let providerThreadId: string | null = null;
     try {
       if (this.args.worker) {
-        await command(this.args.worker[0], this.args.worker.slice(1), { cwd: this.root, env, input: prompt, signal: this.signal, timeoutMs: this.args.timeout * 1000, log });
+        await command(this.args.worker[0], this.args.worker.slice(1), { cwd, env, input: prompt, signal: this.signal, timeoutMs: this.args.timeout * 1000, log });
       } else {
-        const result = await runAgent({ client: this.args.client, prompt, workdir: this.root,
+        const result = await runAgent({ client: this.args.client, prompt, workdir: cwd,
           model: this.args.model, effort: this.args.effort,
           executable: this.args.client === 'codex' ? path.join(HERE, 'bin/codex-worker.js') : this.args.executable,
           permissions: this.args.permissions, timeoutMs: this.args.timeout * 1000, signal: this.signal,
@@ -126,28 +180,42 @@ export class Runner {
     } };
   }
   async run(): Promise<number> {
-    // flock matches the Python runner's lock and automatically releases on exit/crash.
-    let flockSync: typeof import('fs-ext').flockSync;
-    try { ({ flockSync } = await import('fs-ext')); }
-    catch { throw new Error(`Cannot load the advisory lock addon with Node ${process.version}. Run npm rebuild fs-ext using ${process.execPath}, or use the Node version used to install dependencies.`); }
-    const lock = fs.openSync(path.join(this.tasks, '.taskmd-runner.lock'), 'a+');
-    try { try { flockSync(lock, 'exnb'); } catch { throw new Error('Another runner owns this task directory'); }
+    const lease = new AbortController(), originalSignal = this.signal;
+    const stop = () => lease.abort();
+    originalSignal?.addEventListener('abort', stop, { once: true });
+    if (originalSignal?.aborted) lease.abort();
+    this.signal = lease.signal;
+    let release: (() => Promise<void>) | undefined;
+    try {
+      release = await acquireTaskLock(this.tasks, error => { this.lockError = error.message; lease.abort(); });
       fs.mkdirSync(this.runDir, { recursive: true });
       // Check adapter controls before claiming any task.
       if (!this.args.worker) buildRunnerInvocation({ client: this.args.client, prompt: 'preflight', workdir: this.root, model: this.args.model, effort: this.args.effort, permissions: this.args.permissions });
-      await this.cli('validate');
+      if (this.args.gitSync) {
+        this.gitSync = new GitSync(this.root, this.args.gitRepo, [this.runDir, taskLease(this.tasks)], this.runDir, this.signal,
+          this.args.gitConflicts === 'worker' ? conflict => this.conflictWorker(conflict) : undefined);
+        try { await this.gitSync.initialize(); await this.gitSync.requirePath(this.tasks); }
+        catch (error) { this.gitSync.failed(error); return await this.finish('git_sync_error', 1); }
+      } else await this.cli('validate');
       while (!this.args.rounds || this.rows.length < this.args.rounds) {
-        if (this.signal?.aborted) return this.finish('interrupted', 130);
-        const selected = await this.cliJson('next', '--format', 'json', '--strict-priority', '--limit', '1', '--filter', 'status=pending', ...this.filters);
-        if (!Array.isArray(selected)) throw new Error('Unexpected taskmd next response; not an empty backlog');
+        if (this.signal?.aborted) return this.finish(this.lockError ? 'lock_lost' : 'interrupted', this.lockError ? 1 : 130);
+        if (this.gitSync) {
+          try {
+            await this.gitSync.before(this.rows.length + 1);
+            if (fs.readFileSync(this.config, 'utf8') !== this.configText) throw new Error('Git sync changed the runner configuration; restart with the updated configuration');
+            await this.cli('validate');
+          } catch (error) { this.gitSync.failed(error); return await this.finish(this.lockError ? 'lock_lost' : this.signal?.aborted ? 'interrupted' : 'git_sync_error', this.lockError ? 1 : this.signal?.aborted ? 130 : 1); }
+        }
+        const selected = await this.nextTasks();
         if (!selected.length) {
           const remaining = await this.cliJson('list', '--format', 'json', ...this.filters);
           if (!Array.isArray(remaining)) throw new Error('Unexpected taskmd list response');
-          const unfinished = remaining.some(task => !['completed', 'cancelled'].includes(effectiveStatus(task)));
+          const unfinished = remaining.some(task => this.inScope(task) && !['completed', 'cancelled'].includes(effectiveStatus(task)));
           return await this.finish(unfinished ? 'no_ready_tasks' : 'empty', unfinished ? 2 : 0);
         }
         const id = String(selected[0].id);
         const task = await this.cliJson('get', id, '--exact', '--format', 'json');
+        if (!this.inScope(task)) return await this.finish('claim_conflict', 2);
         if (task.remote_only || effectiveStatus(task) !== 'pending') return await this.finish('claim_conflict', 2);
         const file = fs.realpathSync(path.resolve(this.tasks, task.file_path));
         const relative = path.relative(this.tasks, file);
@@ -161,7 +229,7 @@ export class Runner {
         if (!/^[\w.-]+$/.test(id) || id === '.' || id === '..') throw new Error('Unsafe task ID');
         const folder = path.join(this.runDir, `${String(this.rows.length + 1).padStart(3, '0')}-${id}`);
         fs.mkdirSync(folder); await this.status(id, 'in-progress');
-        const row: Record<string, any> = { task_id: id, started_at: now(), round: this.rows.length + 1, client: this.args.worker ? 'custom' : this.args.client };
+        const row: Record<string, any> = { task_id: id, task_path: relative, started_at: now(), round: this.rows.length + 1, client: this.args.worker ? 'custom' : this.args.client };
         this.rows.push(row); console.log(JSON.stringify({ round: row.round, task_id: id, event: 'started', client: row.client }));
         try {
           await this.record(file, `Started round ${row.round}. Evidence: ${folder}`);
@@ -183,6 +251,21 @@ export class Runner {
           await this.status(id, status); await this.cli('validate');
           Object.assign(row, { status, ended_at: now(), checked_before: count[0], checked_after: checks(file)[0], verified_before: verifiedBefore, verified_after: verifiedCount(file), result });
           jsonFile(path.join(folder, 'receipt.json'), row);
+          if (this.gitSync) {
+            const acceptedJournal = readTask(file).body.split('\n## Progress').slice(1).join('\n## Progress').trim();
+            try {
+              await this.gitSync.after(row.round, id, status, async () => {
+                const merged = readTask(file), journal = merged.body.split('\n## Progress').slice(1).join('\n## Progress');
+                if (!isDeepStrictEqual(contract(file), before) || merged.meta.status !== status || !journal.includes(acceptedJournal) || ((status === 'completed' || status === 'in-review') && checks(file)[1])) throw new Error('Git integration changed the accepted task contract, status or handoff');
+                await this.cli('validate');
+              });
+              row.git_sync = 'pushed'; jsonFile(path.join(folder, 'receipt.json'), row);
+            } catch (error) {
+              this.gitSync.failed(error); row.git_sync = 'failed'; row.git_error = this.gitSync.error;
+              jsonFile(path.join(folder, 'receipt.json'), row);
+              return await this.finish(this.lockError ? 'lock_lost' : this.signal?.aborted ? 'interrupted' : 'git_sync_error', this.lockError ? 1 : this.signal?.aborted ? 130 : 1);
+            }
+          }
           if (status === 'blocked') await this.notifications.send('runner.blocked', this.root, id);
           if (noProgress) return await this.finish('no_progress', 2);
         } catch (error) {
@@ -193,10 +276,13 @@ export class Runner {
           try { await this.record(file, failure, true); } catch (e) { progress(file, failure + ` Worklog write failed: ${e}`); }
           Object.assign(row, { status: 'blocked', error: message, ended_at: now() });
           jsonFile(path.join(folder, 'receipt.json'), row);
-          return await this.finish(this.signal?.aborted ? 'interrupted' : 'worker_error', this.signal?.aborted ? 130 : 1);
+          return await this.finish(this.lockError ? 'lock_lost' : this.signal?.aborted ? 'interrupted' : 'worker_error', this.lockError ? 1 : this.signal?.aborted ? 130 : 1);
         }
       }
       return await this.finish('round_limit', 0);
-    } finally { fs.closeSync(lock); }
+    } finally {
+      originalSignal?.removeEventListener('abort', stop);
+      if (release) { try { await release(); } catch (error) { if (!this.lockError) throw error; } }
+    }
   }
 }

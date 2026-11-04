@@ -1,12 +1,22 @@
 import fs from 'node:fs';
-import { parse } from 'yaml';
+import { isScalar, isSeq, parseDocument } from 'yaml';
 
 export const now = () => new Date().toISOString();
 export function readTask(file: string): { meta: Record<string, any>; body: string } {
   const match = fs.readFileSync(file, 'utf8').replaceAll('\r\n', '\n').match(/^---\n([\s\S]*?)\n---(?:\n|$)([\s\S]*)$/);
   if (!match) throw new Error(`Invalid frontmatter: ${file}`);
-  const meta = parse(match[1]);
+  const document = parseDocument(match[1]);
+  if (document.errors.length) throw document.errors[0];
+  const meta = document.toJS();
   if (!meta || typeof meta !== 'object' || Array.isArray(meta)) throw new Error(`Invalid task metadata: ${file}`);
+  // taskmd identifiers are strings, even when its YAML writer leaves 084 unquoted.
+  // Use scalar source text before a numeric conversion can discard zeros or precision.
+  const identifier = (node: unknown, value: unknown) => isScalar(node)
+    ? typeof node.value === 'string' ? node.value : node.source ?? String(node.value)
+    : value;
+  for (const key of ['id', 'parent']) if (key in meta) meta[key] = identifier(document.get(key, true), meta[key]);
+  const dependencies = document.get('dependencies', true);
+  if (isSeq(dependencies)) meta.dependencies = dependencies.items.map((node, index) => identifier(node, meta.dependencies[index]));
   return { meta, body: '\n' + match[2] };
 }
 export function contract(file: string) {

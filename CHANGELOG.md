@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.0 — 2026-11-04
+
+- Add optional Git fetch/integration before each task and commit/push after
+  validated handoffs, with explicit repository selection for workspaces.
+- Add opt-in dedicated conflict workers and bounded push-race recovery. Preserve
+  merge state, local commits and task completion when synchronization fails.
+- Remove the Python forwarding launcher and native lock addon. Use a Node-only
+  lease with stale-owner recovery and interruption cleanup. Stop older runners
+  before upgrading because their advisory locks use a different protocol.
+- Keep task workers, conflict workers and Git synchronization evidence distinct.
+- Add task-subtree allowlists and preserve zero-padded task identifiers through
+  native taskmd rewrites and worklog handoffs.
+
 ## 0.1.0 — 2026-11-04
 
 First packaged TypeScript release of taskmd-runner.
