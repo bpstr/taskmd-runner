@@ -1,5 +1,20 @@
 # Runner validation
 
+## 0.2.1 instruction patch
+
+Changed behavior: worker instructions preserve the ticket's intended outcome and
+acceptance criteria; conflicts require a user decision rather than reframing.
+Only WORKER.md and release metadata change. Retain 0.2.0 runtime evidence below.
+Verify a clean release snapshot: TypeScript build, the package-version test and
+packed CLI version/help; inspect the archive for the scope rule and matching
+package/lockfile versions. Completion requires these checks and a clean diff.
+No runtime behavior changes warrant broader tests or live model calls.
+
+Results: build passed; version test 1 passed, 0 failed, 0 skipped (0.13 seconds).
+Packed CLI version/help passed; archive inspection confirmed the scope rule,
+version 0.2.1 and matching package/lockfile versions. Archive: 29 files, 37,692
+bytes. Logs and archive are retained in `.taskmd-runner/release-0.2.1/`.
+
 ## Git synchronization and Node-only runtime
 
 This batch adds optional Git synchronization at task boundaries, a separately

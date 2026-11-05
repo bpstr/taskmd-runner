@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.1 — 2026-11-05
+
+- Keep workers within the ticket's stated outcome and acceptance criteria.
+  Treat conflicts as blockers and require an explicit user decision for scope
+  changes instead of reframing the ticket around existing behavior or difficulty.
+
 ## 0.2.0 — 2026-11-04
 
 - Add optional Git fetch/integration before each task and commit/push after

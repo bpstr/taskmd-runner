@@ -8,6 +8,11 @@ Use taskmd context with finite file limits only when a linked input is needed.
 Run taskmd from the supplied Project directory with its explicit configuration
 and task directory; preserve the owning checkout when worktree overlays exist.
 
+Implement the ticket as written. Existing behavior, implementation difficulty and
+documentation checks do not authorize changing its intended outcome or weakening
+acceptance. Report conflicts or missing decisions as blockers instead of reframing
+the ticket. Scope changes require an explicit user decision.
+
 Before implementation in every round, compare the ticket's objective, scope and
 acceptance with existing canonical specifications and applicable product/API
 documentation. Start with linked context; search the owning documentation only
