@@ -10,6 +10,7 @@ const threadId = 'prepared-thread', turnId = 'prepared-turn';
 let config, resumed = false, startParams, waiting = false;
 const folder = process.env.TASKMD_ROUND_DIR;
 fs.writeFileSync(path.join(folder, 'server-argv.json'), JSON.stringify(process.argv.slice(2)));
+fs.writeFileSync(path.join(folder, 'server-home.json'), JSON.stringify({ home: process.env.CODEX_HOME }));
 const perform = mode => {
   const args = ['exec', ...(resumed ? ['resume', threadId] : []), '--sandbox', config.sandbox,
     '-c', 'approval_policy="never"', '--output-schema', process.env.TASKMD_RESULT_SCHEMA];
@@ -45,6 +46,13 @@ for await (const line of createInterface({ input: process.stdin })) {
   if (message.method === 'initialize') emit({ id: message.id, result: {} });
   else if (message.method === 'thread/start' || message.method === 'thread/resume') {
     config = p; resumed = message.method === 'thread/resume';
+    const session = path.join(process.env.CODEX_HOME, 'sessions', threadId + '.json');
+    if (resumed && !fs.existsSync(session)) {
+      emit({ id: message.id, error: { message: 'Prepared session missing from worker profile' } }); continue;
+    }
+    if (!resumed && !p.ephemeral) {
+      fs.mkdirSync(path.dirname(session), { recursive: true }); fs.writeFileSync(session, '{}');
+    }
     emit({ id: message.id, result: { thread: { id: threadId } } });
   } else if (message.method === 'turn/start') {
     startParams = p;

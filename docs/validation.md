@@ -1,5 +1,55 @@
 # Runner validation
 
+## 0.3.2 session isolation and release
+
+Issue #1: persistent workers saved conversations into the inherited desktop
+profile. Use a private Codex home per runner invocation, link only profile inputs,
+and override SQLite/log locations. Retain persistence and same-task resumption;
+shared desktop history requires `--codex-session-policy shared`. No existing
+conversation is moved or removed. File credentials are linked, not recorded in
+logs. Keyring-only profiles need the documented file-backed automation setup.
+
+Official references: [Codex state locations](https://learn.chatgpt.com/docs/config-file/environment-variables#core-locations)
+and [app-server start/resume](https://learn.chatgpt.com/docs/app-server).
+The installed Codex 0.160.0 protocol schema was generated locally without a turn.
+CODEX_HOME isolates sessions as well as SQLite; changing only runner receipts or
+SQLite location would leave session files in the shared profile.
+
+Verification plan: build, then selected prepared cases for isolated/shared
+profiles, persistent resume and changed contracts, Codex clarification, deadline
+steering, timeout/crash recovery, native interruption, adapter controls and CLI
+version/validation. Run the Codex Git resolver case because it shares the wrapper.
+The fake server now saves sessions in its effective home and rejects a resume
+from the wrong home. Isolation checks preserve an existing user chat and index,
+reuse synthetic credential/config links, exercise --state-dir, and assert SQLite
+overrides beat inherited configuration/environment paths. No live provider call.
+Reuse the 0.3.1 unaffected runtime, lock, task and Git evidence below; no full suite
+is warranted. Completion requires the affected checks, packed version/help and
+installed prepared checks, whitespace validation, release commit/tag and GitHub
+release artifact. npm publication is outside this GitHub release. Logs and package
+evidence go under `.taskmd-runner/release-0.3.2/`.
+
+Results: build and syntax/whitespace checks passed. Fourteen selected runner
+checks and the Codex Git resolver check passed (15 distinct affected checks).
+The first isolation assertion failed only because macOS resolves `/var` to
+`/private/var`; compare canonical paths on both sides. Its failure log is retained.
+After that test-only correction and stricter empty-policy validation, the affected
+isolation/shared/CLI subset passed (3 checks); other passing evidence was reused.
+Two installed-command prepared scenarios passed: graceful steer/resume and hard
+timeout/retry, both with private persisted sessions and no shared history writes.
+Package/lockfile/installed versions are 0.3.2, and installed runtime hashes match.
+No provider calls, browser sessions, temporary servers or active queue restarts.
+An existing Assign runner and its worker remain active on their loaded runtime;
+restart queues separately to adopt isolation. Existing chats remain untouched.
+
+Final archive: 32 files, 53,200 bytes; every packaged file matches the checkout,
+including the new profile helper. Installed the final archive offline with
+scripts disabled; version/help passed and the new policy is listed. No prepared
+worker processes remain. Removed only the session-generated
+`/tmp/taskmd-codex-schema` (4,501,504 allocated file bytes), retaining the inspected
+thread schemas in release evidence. The release evidence uses about 672 KiB;
+data-volume free space remains about 29.8 GiB. No unrelated cleanup was performed.
+
 ## 0.3.1 patch release
 
 Release the graceful deadline, bounded recovery and JSON-event fixes above.

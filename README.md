@@ -77,6 +77,32 @@ clients and custom workers check the supplied handoff-request file. Unresponsive
 workers still have a hard deadline. Within one runner invocation, Codex resumes
 the task's session after a handoff or recoverable worker failure while its
 contract is unchanged.
+
+By default, Codex workers use a private `codex-home/` inside the runner's run
+directory, including when `--state-dir` is supplied. Persistent sessions and
+SQLite state stay there, so new background chats do not enter your ordinary
+Codex Desktop history. Task retries and clarification turns share that home.
+The runner links configuration, file-based credentials, user instructions,
+hooks, rules, skills and plugins from the inherited `CODEX_HOME` (normally
+`~/.codex`); it never links existing sessions, archives or state databases.
+Worker SQLite and log paths override inherited storage locations. Other relative
+file references in your Codex configuration should use absolute paths.
+
+Keyring-only credentials are scoped to the Codex home and may require a separate
+file-backed automation profile: sign in with
+`CODEX_HOME=/private/runner-profile codex -c cli_auth_credentials_store='"file"' login`,
+then run with that `CODEX_HOME`. Create the private directory first and set
+`cli_auth_credentials_store = "file"` in its `config.toml`. Existing environment
+credentials still pass through. No credentials are copied into runner logs.
+To deliberately use your inherited profile and display persisted worker chats
+alongside your own conversations, select `--codex-session-policy shared`.
+Custom workers and other clients keep their own session policies.
+
+After upgrading, stop and restart existing runners to adopt isolation. Earlier
+worker chats remain in your ordinary history; this change does not archive or
+delete conversations. Keep run directories private, including their credential
+links and any refreshed credentials Codex writes there.
+
 A changed contract or new invocation starts fresh; other clients use the recorded
 checkpoint. An invalid response can receive one clarification turn if the task and
 invocation run budgets allow it. That turn counts as another run, resumes the

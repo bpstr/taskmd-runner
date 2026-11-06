@@ -11,8 +11,11 @@ const value = flag => args.includes(flag) ? args[args.indexOf(flag) + 1] : undef
 const effortConfig = args.find(arg => arg.startsWith('model_reasoning_effort='));
 const effort = effortConfig ? JSON.parse(effortConfig.slice(effortConfig.indexOf('=') + 1)) : undefined;
 const resume = value('resume');
+const isolatedHome = process.env.TASKMD_CODEX_ISOLATED_HOME;
 const child = spawn(process.env.TASKMD_CODEX_EXECUTABLE || 'codex',
-  ['app-server', '--listen', 'stdio://', '-c', 'approval_policy="never"'], { stdio: ['pipe', 'pipe', 'inherit'] });
+  ['app-server', '--listen', 'stdio://', '-c', 'approval_policy="never"',
+    ...(isolatedHome ? ['-c', `sqlite_home=${JSON.stringify(isolatedHome)}`, '-c', `log_dir=${JSON.stringify(path.join(isolatedHome, 'log'))}`] : [])],
+  { stdio: ['pipe', 'pipe', 'inherit'] });
 const emit = event => process.stdout.write(JSON.stringify(event) + '\n');
 const pending = new Map();
 const serverLog = fs.createWriteStream(path.join(process.env.TASKMD_ROUND_DIR, 'codex-server.jsonl'));

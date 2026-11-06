@@ -33,11 +33,11 @@ function task(root, id, { priority = 'medium', dependencies = [], status = 'pend
   fs.writeFileSync(file, '---\n' + stringify({ id, title: 'Task ' + id, status, priority, dependencies }) + '---\n# Task\n\n- [ ] Deliver the fixture\n');
   return file;
 }
-async function run(root, mode = 'completed', options = [], adapter = false) {
+async function run(root, mode = 'completed', options = [], adapter = false, env = {}) {
   const args = [path.join(ROOT, 'bin/taskmd-runner.js'), '--project', root, '--notify', 'off', '--timeout', '10', ...options];
   if (adapter) args.push('--executable', fake);
   else args.push('--worker', process.execPath, fake, mode);
-  const child = spawn(process.execPath, args, { env: { ...process.env, PREPARED_MODE: mode } });
+  const child = spawn(process.execPath, args, { env: { ...process.env, CODEX_HOME: path.join(root, 'prepared-profile'), PREPARED_MODE: mode, ...env } });
   let stdout = '', stderr = '';
   child.stdout.on('data', chunk => stdout += chunk); child.stderr.on('data', chunk => stderr += chunk);
   const code = await new Promise((resolve, reject) => { child.once('error', reject); child.once('close', resolve); });
@@ -293,6 +293,51 @@ test('Codex resumes a partial task session and starts the next task fresh within
   assert.ok(supplied >= 10000 && supplied < 12000, String(supplied));
   assert.equal(Number(prompt.match(/Worker budget: ([\d.]+) seconds/)[1]), 10);
   assert.equal(Number(prompt.match(/Reserve the final ([\d.]+) seconds/)[1]), 1);
+});
+test('Codex isolates persistent history and reuses profile inputs across continuations', async t => {
+  const root = fixture(t); task(root, '001');
+  const profile = path.join(root, 'prepared-profile'); fs.mkdirSync(profile);
+  const inputs = { 'auth.json': '{"prepared":"credential"}', 'config.toml': 'sqlite_home = "/shared/state"\n',
+    'AGENTS.md': 'Prepared instructions', 'hooks.json': '{}', '.credentials.json': '{}', 'worker.config.toml': '' };
+  for (const [name, content] of Object.entries(inputs)) fs.writeFileSync(path.join(profile, name), content);
+  for (const name of ['sessions', 'archived_sessions', 'skills', 'rules', 'plugins']) fs.mkdirSync(path.join(profile, name));
+  fs.writeFileSync(path.join(profile, 'sessions/manual.json'), 'existing user chat');
+  fs.writeFileSync(path.join(profile, 'state.sqlite'), 'existing user index');
+  const before = fs.readdirSync(profile).sort();
+  const state = path.join(root, 'separate-state');
+  const r = await run(root, 'partial-once', ['--state-dir', state], true, { CODEX_SQLITE_HOME: '/shared/env-state' });
+  assert.equal(r.code, 0, r.stderr); assert.equal(r.summary.rounds[1].session_resumed, true);
+  const dir = path.dirname(r.events.find(event => event.summary).summary), home = path.join(dir, 'codex-home');
+  assert.ok(dir.startsWith(state + path.sep));
+  for (const round of ['001-001', '002-001']) {
+    assert.equal(JSON.parse(fs.readFileSync(path.join(dir, round, 'server-home.json'))).home, home);
+    const argv = JSON.parse(fs.readFileSync(path.join(dir, round, 'server-argv.json')));
+    assert.ok(argv.includes(`sqlite_home=${JSON.stringify(home)}`));
+    assert.ok(argv.includes(`log_dir=${JSON.stringify(path.join(home, 'log'))}`));
+  }
+  for (const name of [...Object.keys(inputs), 'skills', 'rules', 'plugins'])
+    assert.equal(fs.realpathSync(path.join(home, name)), fs.realpathSync(path.join(profile, name)));
+  assert.ok(!fs.lstatSync(path.join(home, 'sessions')).isSymbolicLink());
+  assert.equal(fs.existsSync(path.join(home, 'archived_sessions')), false);
+  assert.equal(fs.existsSync(path.join(home, 'state.sqlite')), false);
+  assert.deepEqual(fs.readdirSync(profile).sort(), before);
+  assert.deepEqual(fs.readdirSync(path.join(profile, 'sessions')), ['manual.json']);
+  assert.equal(fs.readFileSync(path.join(profile, 'sessions/manual.json'), 'utf8'), 'existing user chat');
+  assert.equal(fs.readFileSync(path.join(profile, 'state.sqlite'), 'utf8'), 'existing user index');
+  for (const [name, content] of Object.entries(inputs)) assert.equal(fs.readFileSync(path.join(profile, name), 'utf8'), content);
+});
+test('Codex shared history requires an explicit session policy', async t => {
+  const root = fixture(t); task(root, '001');
+  const profile = path.join(root, 'prepared-profile'); fs.mkdirSync(profile);
+  const r = await run(root, 'completed', ['--codex-session-policy', 'shared'], true);
+  assert.equal(r.code, 0, r.stderr);
+  const dir = path.dirname(r.events.find(event => event.summary).summary), folder = path.join(dir, '001-001');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(folder, 'server-home.json'))).home, profile);
+  assert.ok(fs.existsSync(path.join(profile, 'sessions/prepared-thread.json')));
+  assert.equal(fs.existsSync(path.join(dir, 'codex-home')), false);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(folder, 'server-argv.json'))).some(arg => arg.startsWith('sqlite_home=')), false);
+  assert.throws(() => parseArgs(['--project', root, '--codex-session-policy', 'hidden']), /Invalid Codex session policy/);
+  assert.throws(() => parseArgs(['--project', root, '--codex-session-policy', '']), /Invalid Codex session policy/);
 });
 test('Codex starts a fresh continuation when the task contract changes between runs', async t => {
   const root = fixture(t), file = task(root, '001');

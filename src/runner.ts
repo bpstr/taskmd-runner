@@ -11,12 +11,14 @@ import { readTask, contract, checks, verifiedCount, progress, taskContext, taskR
 import { Notifications, type NotificationOptions } from './notifications.js';
 import { GitSync, type GitConflict } from './git.js';
 import { acquireTaskLock, taskLease, taskRegistryLease } from './lock.js';
+import { isolatedCodexHome } from './codex.js';
 
 const HERE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export interface Options extends NotificationOptions {
   project: string; config?: string; taskDir?: string; stateDir?: string; taskmd: string;
   filter: string[]; taskPrefix?: string[]; rounds: number; timeout: number; client: ClientName; executable?: string;
   maxTaskRuns: number; blockAfterRuns: number;
+  codexSessionPolicy?: 'isolated' | 'shared';
   sandbox: 'workspace-write' | 'danger-full-access'; permissions: 'default' | 'bypass';
   model?: string; effort?: string; worker?: string[];
   gitSync: boolean; gitRepo: string[]; gitConflicts: 'stop' | 'worker';
@@ -219,7 +221,10 @@ export class Runner {
           // Tool output is one JSON event; its limit is separate from retained output tails.
           maxEventBytes: 16 * 1024 * 1024,
           // Preserve Codex's original workspace-write/never policy via a small executable wrapper.
-          env: { ...env, TASKMD_CODEX_SANDBOX: this.args.sandbox, TASKMD_CODEX_EXECUTABLE: this.args.executable || 'codex', TASKMD_RESULT_SCHEMA: path.join(HERE, 'result.schema.json') },
+          env: { ...env, ...(this.args.client === 'codex' && this.args.codexSessionPolicy !== 'shared'
+            ? { CODEX_HOME: isolatedCodexHome(this.runDir), TASKMD_CODEX_ISOLATED_HOME: path.join(this.runDir, 'codex-home') }
+            : { TASKMD_CODEX_ISOLATED_HOME: undefined }),
+            TASKMD_CODEX_SANDBOX: this.args.sandbox, TASKMD_CODEX_EXECUTABLE: this.args.executable || 'codex', TASKMD_RESULT_SCHEMA: path.join(HERE, 'result.schema.json') },
           onOutput: chunk => { log.write(chunk); },
         });
         jsonFile(path.join(folder, 'agent.json'), { client: result.client, status: result.status, code: result.code, signal: result.signal,

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.2 — 2026-11-06
+
+- Isolate Codex worker sessions under each runner's state directory by default,
+  keeping background conversations out of ordinary Codex Desktop history while
+  preserving same-task continuation, clarification and deadline steering.
+- Reuse profile configuration and file-based credentials without sharing session
+  stores. Override inherited SQLite/log paths; document keyring-only setup.
+- Add `--codex-session-policy shared` for explicit use of shared desktop history.
+  Existing conversations are preserved; restart running queues after upgrading.
+
 ## 0.3.1 — 2026-11-06
 
 - Request a durable checkpoint before the worker deadline. Codex receives an
