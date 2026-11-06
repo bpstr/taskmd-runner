@@ -18,6 +18,10 @@ budget. Record verified slices as checkpoints, then continue with the next
 required implementation or affected check in this session. Task sizing estimates
 guide planning; finishing one file, path or test case does not end execution.
 Reserve the supplied handoff time before the deadline for a durable checkpoint.
+When the runner requests a deadline handoff, stop starting new work, finish or
+safely stop the current operation, and return a checkpoint promptly. Check the
+supplied handoff-request file before each new operation. Record unfinished and
+unverified work honestly, with the exact next edit; a timeout is resumable work.
 
 Before implementation in every round, compare the ticket's objective, scope and
 acceptance with existing canonical specifications and applicable product/API
@@ -54,8 +58,8 @@ provider tests, record live fixtures or use subscription proxies for tests.
 
 Report `completed` only after every checklist and acceptance criterion passes;
 include exact check results or source-bound retained receipts in `evidence`.
-Report `pending` only when the time or context limit requires a handoff after
-verified progress. Record the specific limit, retained evidence and exact next
+Report `pending` when the time or context limit requires a handoff. Preserve
+verified progress and identify checks that have not run. Record the specific limit, retained evidence and exact next
 edit in Progress and `next_step`. Report `blocked` with the missing input, its owner and retry
 trigger when no selected criterion can advance. Under PR-review, completed work
 requires an actual PR and reports `in-review`; completion waits for merge.

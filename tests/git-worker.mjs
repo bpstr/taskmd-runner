@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync, execFileSync } from 'node:child_process';
+if (process.argv.includes('app-server')) { await import('./fake-codex-server.mjs'); process.exit(); }
 const single = process.argv.find(arg => arg.startsWith('--single='));
 let prompt = single ? single.slice(9) : '';
 if (!single) for await (const chunk of process.stdin) prompt += chunk;

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.1 — 2026-11-06
+
+- Request a durable checkpoint before the worker deadline. Codex receives an
+  active-turn message through app-server; other workers check a handoff file.
+- Preserve work and retry timeouts, crashes and unfinished checkpoints within
+  the task-run budget. Exhausted tasks yield to independent ready work.
+- Allow JSON events up to 16 MiB while retaining bounded output tails, and
+  include the actual parser or provider error in failure receipts.
+- Resume Codex sessions without downloading their full turn history. Preserve
+  sandbox settings, structured results, usage and interruption cleanup.
+
 ## 0.3.0 — 2026-11-06
 
 - Allow runners with disjoint task prefixes to share a task directory while

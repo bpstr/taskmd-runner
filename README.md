@@ -70,9 +70,13 @@ Codex retains the original sandbox and `approval_policy="never"` behavior.
 `--executable` overrides the selected agent binary. Each task starts a fresh
 session. Workers continue through full task acceptance within the supplied
 deadline; verified slices are checkpoints within execution. Sizing estimates do
-not end a run. A verified partial handoff is for an actual time/context limit,
-with the reason and next edit recorded. Within one runner invocation, Codex
-resumes the task's session after a partial handoff while its contract is unchanged.
+not end a run. A partial handoff records the actual time/context limit, retained
+verification, unverified work and next edit. Before the deadline, the runner asks
+for a checkpoint: Codex receives an active-turn message through app-server; other
+clients and custom workers check the supplied handoff-request file. Unresponsive
+workers still have a hard deadline. Within one runner invocation, Codex resumes
+the task's session after a handoff or recoverable worker failure while its
+contract is unchanged.
 A changed contract or new invocation starts fresh; other clients use the recorded
 checkpoint. An invalid response can receive one clarification turn if the task and
 invocation run budgets allow it. That turn counts as another run, resumes the
@@ -89,6 +93,11 @@ are read on demand. Progress and terminal evidence stay under
 `.taskmd-runner/<run>/<round>/`; `summary.json` records elapsed seconds, prompt
 bytes, reported token usage and checklist progress. These local artifacts can contain
 source context; keep them private. Token usage is not a monetary-cost estimate.
+
+Worker logs stream to disk; Codex's original protocol stream is also retained as
+`codex-server.jsonl`. The adapter retains only the latest 1 MiB of each
+output stream in memory, while individual JSON events can be up to 16 MiB.
+Larger events fail the round; the adapter error is included in its receipt.
 
 Every worker receives the mandatory documentation-consistency check in
 [WORKER.md](WORKER.md). It records alignment, an authorized change, a conflict or
@@ -109,10 +118,10 @@ Transitions:
 | --- | --- | --- |
 | Verified acceptance | pending → in-progress → completed | Select next task |
 | PR-review acceptance + linked real PR | pending → in-progress → in-review | Wait for manual merge disposition |
-| Time/context limit after verified progress | in-progress → pending | Continue from the checkpoint with retained evidence |
+| Time/context limit | in-progress → pending | Continue from the checkpoint with retained evidence |
 | Unfinished at the per-task run limit | in-progress → blocked | Continue independent work |
 | Missing prerequisite/input | in-progress → blocked | Continue independent work |
-| No verified progress, failure or timeout | in-progress → blocked | Record the reason and continue independent work |
+| Worker failure, timeout or no new verified progress | in-progress → pending | Retry within the task-run budget; block at the limit and continue independent work |
 | Invalid result | in-progress → blocked or accepted result | One bounded correction turn; continue independent work if still blocked |
 | Operator interruption or lost lock | in-progress → blocked | Stop explicitly |
 

@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { parse, stringify } from 'yaml';
+if (process.argv.includes('app-server')) { await import('./fake-codex-server.mjs'); process.exit(); }
 let mode = process.env.PREPARED_MODE || process.argv[2] || 'completed';
 let prompt = '';
 if (process.argv.some(arg => arg.startsWith('--single='))) prompt = process.argv.find(arg => arg.startsWith('--single=')).slice(9);
@@ -12,6 +13,8 @@ const file = process.env.TASKMD_TASK_FILE, output = process.env.TASKMD_RESULT_FI
 fs.writeFileSync(path.join(process.env.TASKMD_ROUND_DIR, 'invocation.json'), JSON.stringify(process.argv.slice(2)));
 if (mode.endsWith('-first')) mode = path.basename(file).startsWith('001-') ? mode.slice(0, -6) : 'completed';
 if (mode === 'partial-once') mode = /taskmd-runner runs: 1 -->/.test(fs.readFileSync(file, 'utf8')) ? 'partial' : 'completed';
+if (mode === 'timeout-once') mode = /taskmd-runner runs: 1 -->/.test(fs.readFileSync(file, 'utf8')) ? 'timeout' : 'completed';
+if (mode === 'crash-once') mode = /taskmd-runner runs: 1 -->/.test(fs.readFileSync(file, 'utf8')) ? 'exit' : 'completed';
 if (mode === 'repairable') mode = prompt.includes('\nClarification request:\n') ? 'completed' : 'invalid-fields';
 if (mode === 'unrepairable') mode = 'invalid-fields';
 if (mode === 'timeout') {
@@ -40,6 +43,13 @@ if (mode === 'partial') result.next_step = 'Prepared context-limit handoff: cont
 if (!['missing-docs', 'missing-docs-evidence'].includes(mode)) result.evidence.push(docs);
 if (mode === 'invalid-fields') delete result.next_step;
 if (mode !== 'text-only') fs.writeFileSync(output, JSON.stringify(result));
+if (['large-event', 'oversized-event'].includes(mode)) {
+  // One tool response can exceed the retained stdout tail without failing a run.
+  console.log(JSON.stringify({ type: 'item.completed', item: {
+    type: 'command_execution', aggregated_output: 'x'.repeat((mode === 'large-event' ? 2 : 17) * 1024 * 1024),
+  } }));
+}
+if (mode === 'provider-error') console.log(JSON.stringify({ type: 'error', message: 'Prepared provider failure' }));
 if (process.argv.includes('exec')) {
   console.log(JSON.stringify({ type: 'thread.started', thread_id: 'prepared-thread' }));
   console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: JSON.stringify(result) } }));

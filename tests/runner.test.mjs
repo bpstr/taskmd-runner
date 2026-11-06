@@ -60,9 +60,101 @@ test('drains work then exits without polling an empty queue', async t => {
 test('empty queue never launches worker', async t => {
   const r = await run(fixture(t), 'exit'); assert.equal(r.code, 0, r.stderr); assert.deepEqual(r.summary.rounds, []);
 });
+test('adapter accepts large tool events while bounding retained output', async t => {
+  for (const client of ['codex', 'claude']) {
+    const root = fixture(t), file = task(root, '001');
+    const r = await run(root, 'large-event', ['--client', client], true);
+    assert.equal(r.code, 0, r.stderr); assert.equal(r.summary.reason, 'empty');
+    assert.equal(readTask(file).meta.status, 'completed');
+    const folder = path.join(path.dirname(r.events.find(event => event.summary).summary), '001-001');
+    const agent = JSON.parse(fs.readFileSync(path.join(folder, 'agent.json'), 'utf8'));
+    assert.equal(agent.status, 'success'); assert.equal(agent.error, null);
+    assert.equal(agent.truncated.stdout, true);
+    assert.equal(agent.usage.inputTokens, 10);
+    assert.ok(fs.statSync(path.join(folder, 'worker.jsonl')).size > 2 * 1024 * 1024);
+  }
+});
+test('adapter reports event overflow and rejects a completed receipt', async t => {
+  const root = fixture(t), file = task(root, '001');
+  const r = await run(root, 'oversized-event', [], true);
+  assert.equal(readTask(file).meta.status, 'blocked');
+  assert.match(r.summary.rounds[0].error, /JSON event exceeds maxEventBytes \(16777216\)/);
+  assert.equal(r.summary.rounds[0].recovery_reason, 'worker_error');
+  assert.equal(r.summary.rounds.at(-1).blocked_reason, 'task_run_limit');
+});
+test('adapter reports provider errors even with a completed receipt and zero exit', async t => {
+  for (const client of ['codex', 'claude']) {
+    const root = fixture(t), file = task(root, '001');
+    const r = await run(root, 'provider-error', ['--client', client], true);
+    assert.equal(readTask(file).meta.status, 'blocked');
+    assert.match(r.summary.rounds[0].error, /Prepared provider failure/);
+    assert.equal(r.summary.rounds[0].recovery_reason, 'worker_error');
+    assert.equal(r.summary.rounds.at(-1).blocked_reason, 'task_run_limit');
+  }
+});
+test('Codex timeout retries within the task budget then continues independent work', async t => {
+  const root = fixture(t), file = task(root, '001', { priority: 'critical' });
+  const dependent = task(root, '002', { dependencies: ['001'] });
+  const independent = task(root, '003');
+  const r = await run(root, 'timeout-first', ['--timeout', '1'], true);
+  assert.equal(r.code, 2, r.stderr); assert.equal(r.summary.reason, 'no_ready_tasks');
+  assert.deepEqual(r.summary.rounds.map(row => row.task_id), ['001', '001', '001', '003']);
+  assert.equal(readTask(file).meta.status, 'blocked'); assert.equal(taskRuns(file), 3);
+  assert.equal(readTask(dependent).meta.status, 'pending');
+  assert.equal(readTask(independent).meta.status, 'completed');
+  assert.match(r.summary.rounds[0].error, /codex timed-out \(124\)/);
+  assert.equal(r.summary.rounds[0].recovery_reason, 'timeout');
+  assert.equal(r.summary.rounds[1].session_resumed, true);
+  assert.equal(r.summary.rounds[2].blocked_reason, 'task_run_limit');
+  assert.equal(r.summary.rounds[3].session_resumed, false);
+  assert.equal(r.events.find(event => event.event === 'task_blocked').next_action, 'select_next_task');
+  const folder = path.join(path.dirname(r.events.find(event => event.summary).summary), '001-001');
+  const agent = JSON.parse(fs.readFileSync(path.join(folder, 'agent.json'), 'utf8'));
+  assert.equal(agent.status, 'timed-out'); assert.equal(agent.code, 124);
+  const pid = Number(fs.readFileSync(path.join(folder, 'worker.pid'), 'utf8'));
+  assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+});
 test('custom worker help flags remain worker arguments', async t => {
   const root = fixture(t); task(root, '001'); const r = await run(root, '--help');
   assert.equal(r.code, 0, r.stderr); assert.equal(r.summary.reason, 'empty');
+});
+test('Codex receives a deadline steer and resumes its graceful checkpoint', async t => {
+  const root = fixture(t), file = task(root, '001');
+  const r = await run(root, 'graceful-once', ['--timeout', '3'], true);
+  assert.equal(r.code, 0, r.stderr); assert.equal(r.summary.reason, 'empty');
+  assert.deepEqual(r.summary.rounds.map(row => row.status), ['pending', 'completed']);
+  assert.equal(r.summary.rounds[1].session_resumed, true); assert.equal(taskRuns(file), 2);
+  const folder = path.join(path.dirname(r.events.find(event => event.summary).summary), '001-001');
+  const rpc = fs.readFileSync(path.join(folder, 'rpc.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const steer = rpc.find(message => message.method === 'turn/steer').params;
+  assert.equal(steer.threadId, 'prepared-thread'); assert.equal(steer.expectedTurnId, 'prepared-turn');
+  assert.match(steer.input[0].text, /record a durable Progress checkpoint/);
+  assert.equal(r.summary.rounds[0].handoff_requested, true);
+  assert.ok(fs.existsSync(path.join(folder, 'handoff-request.json')));
+  assert.match(fs.readFileSync(path.join(folder, 'worker.jsonl'), 'utf8'), /handoff.delivered/);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(folder, 'agent.json'), 'utf8')).status, 'success');
+});
+for (const [mode, adapter] of [['timeout-once', true], ['crash-once', true], ['crash-once', false]]) {
+  test(`${adapter ? 'Codex' : 'custom worker'} recovers ${mode} on the next attempt`, async t => {
+    const root = fixture(t), file = task(root, '001');
+    const r = await run(root, mode, ['--timeout', '1'], adapter);
+    assert.equal(r.code, 0, r.stderr); assert.equal(r.summary.reason, 'empty');
+    assert.deepEqual(r.summary.rounds.map(row => row.status), ['pending', 'completed']);
+    assert.equal(r.summary.rounds[0].next_action, 'retry_task');
+    assert.equal(readTask(file).meta.status, 'completed'); assert.equal(taskRuns(file), 2);
+    assert.equal(r.summary.blocked_tasks.length, 0);
+    assert.equal(r.events.filter(event => event.event === 'task_retry').length, 1);
+  });
+}
+test('worker recovery respects invocation caps and survives a runner restart', async t => {
+  const root = fixture(t), file = task(root, '001');
+  const first = await run(root, 'crash-once', ['--rounds', '1'], true);
+  assert.equal(first.code, 0, first.stderr); assert.equal(first.summary.reason, 'round_limit');
+  assert.equal(readTask(file).meta.status, 'pending'); assert.equal(taskRuns(file), 1);
+  assert.equal(first.summary.rounds[0].recovery_reason, 'worker_error');
+  const second = await run(root, 'crash-once', [], true);
+  assert.equal(second.code, 0, second.stderr); assert.equal(readTask(file).meta.status, 'completed');
+  assert.equal(taskRuns(file), 2);
 });
 test('blocked task permits independent work and leaves unfinished exit', async t => {
   const root = fixture(t); task(root, '001', { priority: 'critical' }); task(root, '002', { dependencies: ['001'] }); task(root, '003');
@@ -147,14 +239,15 @@ for (const race of ['claim', 'dependency']) {
     else assert.equal(readTask(path.join(root, 'tasks/002-task.md')).meta.status, 'pending');
   });
 }
-test('pending without checked progress blocks that task and continues independent work', async t => {
+test('pending without checked progress retries within budget then continues independent work', async t => {
   const root = fixture(t), file = task(root, '001', { priority: 'critical' });
   const dependent = task(root, '002', { dependencies: ['001'] }); task(root, '003');
   const r = await run(root, 'pending-first');
   assert.equal(r.code, 2, r.stderr); assert.equal(r.summary.reason, 'no_ready_tasks');
-  assert.deepEqual(r.summary.rounds.map(row => row.task_id), ['001', '003']);
+  assert.deepEqual(r.summary.rounds.map(row => row.task_id), ['001', '001', '001', '003']);
   assert.equal(readTask(file).meta.status, 'blocked'); assert.equal(readTask(dependent).meta.status, 'pending');
-  assert.equal(r.summary.rounds[0].blocked_reason, 'no_progress');
+  assert.equal(r.summary.rounds[0].recovery_reason, 'no_progress');
+  assert.equal(r.summary.rounds[2].blocked_reason, 'task_run_limit');
   assert.equal(r.events.find(event => event.event === 'task_blocked').next_action, 'select_next_task');
 });
 for (const mode of ['false-completion', 'scope', 'status', 'malformed', 'exit', 'timeout']) {
@@ -163,7 +256,7 @@ for (const mode of ['false-completion', 'scope', 'status', 'malformed', 'exit', 
     const dependent = task(root, '002', { dependencies: ['001'] }); task(root, '003');
     const r = await run(root, mode + '-first', mode === 'timeout' ? ['--timeout', '0.1'] : []);
     assert.equal(r.code, 2, r.stderr); assert.equal(r.summary.reason, 'no_ready_tasks');
-    const attempts = ['false-completion', 'malformed'].includes(mode) ? 2 : 1;
+    const attempts = ['false-completion', 'malformed'].includes(mode) ? 2 : ['exit', 'timeout'].includes(mode) ? 3 : 1;
     assert.deepEqual(r.summary.rounds.map(row => row.task_id), [...Array(attempts).fill('001'), '003']);
     assert.equal(readTask(file).meta.status, 'blocked'); assert.equal(readTask(dependent).meta.status, 'pending');
     assert.equal(readTask(path.join(root, 'tasks/003-task.md')).meta.status, 'completed');
@@ -191,6 +284,8 @@ test('Codex resumes a partial task session and starts the next task fresh within
   const args = folder => JSON.parse(fs.readFileSync(path.join(dir, folder, 'invocation.json'), 'utf8'));
   assert.ok(!args('001-001').includes('resume'));
   const continued = args('002-001'); assert.equal(continued[continued.indexOf('resume') + 1], 'prepared-thread');
+  const rpc = fs.readFileSync(path.join(dir, '002-001/rpc.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(rpc.find(message => message.method === 'thread/resume').params.excludeTurns, true);
   assert.ok(!args('003-002').includes('resume'));
   const prompt = fs.readFileSync(path.join(dir, '001-001/prompt.md'), 'utf8');
   const deadline = Date.parse(prompt.match(/Deadline \(UTC\): ([\dT:.-]+Z)/)[1]);
@@ -336,8 +431,14 @@ for (const client of ['codex', 'claude', 'grok']) {
     if (client !== 'grok') assert.equal(r.summary.rounds[0].usage.inputTokens, 10);
     if (client === 'codex') {
       const folder = path.dirname(r.events.find(x => x.summary).summary);
-      const args = JSON.parse(fs.readFileSync(path.join(folder, '001-001/invocation.json'), 'utf8'));
-      assert.ok(args.includes('workspace-write')); assert.ok(args.includes('--output-schema')); assert.ok(args.includes('approval_policy="never"'));
+      const messages = fs.readFileSync(path.join(folder, '001-001/rpc.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+      const thread = messages.find(message => message.method === 'thread/start').params;
+      const turn = messages.find(message => message.method === 'turn/start').params;
+      assert.equal(messages.find(message => message.method === 'initialize').params.clientInfo.version,
+        JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version);
+      assert.equal(thread.sandbox, 'workspace-write'); assert.equal(thread.approvalPolicy, 'never');
+      assert.equal(thread.model, 'gpt-6.1-sol'); assert.equal(turn.effort, 'medium');
+      assert.deepEqual(turn.outputSchema, JSON.parse(fs.readFileSync(path.join(ROOT, 'result.schema.json'), 'utf8')));
     }
   });
 }
@@ -357,9 +458,10 @@ test('notifications deduplicate successful submissions and retain failed evidenc
   await off.sendForReason('empty', root);
   assert.equal(disabledCalls, 0);
 });
-test('SIGTERM blocks the claimed task, reaps the worker and releases the lock', async t => {
+for (const adapter of [false, true]) test(`SIGTERM reaps ${adapter ? 'Codex' : 'custom'} worker and releases the lock without retrying`, async t => {
   const root = fixture(t); const file = task(root, '001');
-  const child = spawn(process.execPath, [path.join(ROOT, 'bin/taskmd-runner.js'), '--project', root, '--notify', 'off', '--worker', process.execPath, fake, 'timeout']);
+  const child = spawn(process.execPath, [path.join(ROOT, 'bin/taskmd-runner.js'), '--project', root, '--notify', 'off',
+    ...(adapter ? ['--executable', fake] : ['--worker', process.execPath, fake, 'timeout'])], { env: { ...process.env, PREPARED_MODE: 'timeout' } });
   let stdout = '', stderr = '';
   child.stdout.on('data', chunk => stdout += chunk); child.stderr.on('data', chunk => stderr += chunk);
   const closed = new Promise(resolve => child.once('close', resolve));
@@ -377,7 +479,9 @@ test('SIGTERM blocks the claimed task, reaps the worker and releases the lock', 
     child.kill('SIGTERM'); assert.equal(await closed, 130, stderr);
     assert.throws(() => process.kill(workerPid, 0), /ESRCH/); assert.equal(readTask(file).meta.status, 'blocked');
     const final = stdout.trim().split('\n').map(line => JSON.parse(line)).find(event => event.summary);
-    assert.equal(JSON.parse(fs.readFileSync(final.summary)).reason, 'interrupted');
+    const summary = JSON.parse(fs.readFileSync(final.summary));
+    assert.equal(summary.reason, 'interrupted'); assert.equal(summary.rounds.length, 1);
+    assert.doesNotMatch(stdout, /"event":"task_retry"/);
     const release = await acquireTaskLock(path.join(root, 'tasks'), () => {}); await release();
   } finally { if (child.exitCode === null && child.signalCode === null) { child.kill('SIGTERM'); await closed; } }
 });

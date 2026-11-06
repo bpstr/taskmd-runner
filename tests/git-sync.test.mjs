@@ -135,7 +135,8 @@ for (const mode of ['pending-first', 'exit-first', 'unrepairable-first', 'scope-
     const base = temporary(t), { repo, remote } = repository(base); tasks(repo, 2); commit(repo); git(repo, 'push');
     const r = await run(repo, [], { PREPARED_GIT_MODE: mode, PREPARED_GIT_REPOS: JSON.stringify([repo]) });
     assert.equal(r.code, 2, r.stderr); assert.equal(r.summary.reason, 'no_ready_tasks');
-    assert.deepEqual(r.summary.rounds.map(row => row.task_id), mode === 'unrepairable-first' ? ['001', '001', '002'] : ['001', '002']);
+    const attempts = ['pending-first', 'exit-first'].includes(mode) ? 3 : mode === 'unrepairable-first' ? 2 : 1;
+    assert.deepEqual(r.summary.rounds.map(row => row.task_id), [...Array(attempts).fill('001'), '002']);
     assert.match(git(remote, 'show', 'main:tasks/001-task.md'), /status: blocked/);
     assert.match(git(remote, 'show', 'main:tasks/002-task.md'), /status: completed/);
     assert.doesNotMatch(git(remote, 'show', 'main:tasks/001-task.md'), /# Changed scope/);

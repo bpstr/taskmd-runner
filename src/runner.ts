@@ -47,6 +47,9 @@ const jsonFile = (file: string, data: unknown) => fs.writeFileSync(file, JSON.st
 class InvalidResponse extends Error {
   constructor(message: string, public metrics?: Record<string, unknown>) { super(message); }
 }
+class WorkerFailure extends Error {
+  constructor(message: string, public kind: string, public metrics?: Record<string, unknown>) { super(message); }
+}
 interface Clarification { folder: string; error: string; sessionId?: string; }
 
 export class Runner {
@@ -167,7 +170,7 @@ export class Runner {
     const resultFile = path.join(folder, 'result.json');
     const prompt = fs.readFileSync(path.join(HERE, 'WORKER.md'), 'utf8') +
       `\nProject: ${this.root}\nWorkflow: ${this.workflow}\nClient: ${this.args.worker ? 'custom' : this.args.client}\nTask file: ${file}\nResult file: ${resultFile}\n` +
-      `\nWorker budget: ${this.args.timeout} seconds. Deadline (UTC): ${new Date(Date.now() + this.args.timeout * 1000).toISOString()}. Reserve the final ${Math.min(60, this.args.timeout / 10)} seconds for the handoff. Continue through all remaining task acceptance while time and context permit.\n` +
+      `\nWorker budget: ${this.args.timeout} seconds. Deadline (UTC): ${new Date(Date.now() + this.args.timeout * 1000).toISOString()}. Reserve the final ${Math.min(60, this.args.timeout / 10)} seconds for the handoff. Continue through all remaining task acceptance while time and context permit. Check ${path.join(folder, 'handoff-request.json')} before starting each new operation; when present, checkpoint and return promptly.\n` +
       (resumeSessionId && !clarification ? '\nContinue the same task session from the next required edit. Reuse unchanged context and compatible passing evidence.\n' : '') +
       `\nTask run: ${taskRuns(file)} of ${Math.min(this.args.maxTaskRuns, this.args.blockAfterRuns)} allowed runs. An unfinished task at the limit becomes blocked; independent work continues. Preserve the runner-owned taskmd-runner runs comment in Progress.\n` +
       (this.gitSync ? `\nGit sync is enabled. The controller owns commits, pushes and merges in these checkouts: ${this.gitSync.repositories.map(repo => repo.path).join(', ')}. Leave Git history, branch and index unchanged; edit task-owned working files only.\n` : '') +
@@ -187,19 +190,34 @@ export class Runner {
   private async invokeWorker(prompt: string, folder: string, cwd: string, extraEnv: NodeJS.ProcessEnv, resumeSessionId?: string) {
     const resultFile = path.join(folder, 'result.json');
     fs.writeFileSync(path.join(folder, 'prompt.md'), prompt);
-    const env = { ...process.env, ...extraEnv, TASKMD_RESULT_FILE: resultFile, TASKMD_ROUND_DIR: folder, ASSIGN_OFFLINE_TESTS: '1' };
+    const handoffAt = Date.now() + (this.args.timeout - Math.min(60, this.args.timeout / 10)) * 1000;
+    const handoffMessage = 'The worker deadline is approaching. Stop starting new work. Finish or safely stop the current operation, save changed files, and record a durable Progress checkpoint with actual verification, remaining acceptance and the exact next edit. Return the required JSON now: pending for unfinished work, completed only if all acceptance is verified, or blocked for a concrete external prerequisite. Preserve scope and report unverified work honestly.';
+    const env = { ...process.env, ...extraEnv, TASKMD_RESULT_FILE: resultFile, TASKMD_ROUND_DIR: folder, ASSIGN_OFFLINE_TESTS: '1',
+      TASKMD_HANDOFF_AT: String(handoffAt), TASKMD_HANDOFF_MESSAGE: handoffMessage };
     const log = fs.createWriteStream(path.join(folder, 'worker.jsonl'));
     const started = performance.now(); let usage: Usage | Record<string, number> | null = null;
     let providerThreadId: string | null = null;
+    let handoffRequested = false, handoffError: string | undefined;
+    const metrics = () => ({ elapsed_seconds: Math.round((performance.now() - started) / 10) / 100,
+      prompt_bytes: Buffer.byteLength(prompt), usage, provider_thread_id: providerThreadId, handoff_requested: handoffRequested,
+      ...(handoffError ? { handoff_warning_error: handoffError } : {}) });
+    const handoffTimer = setTimeout(() => {
+      handoffRequested = true;
+      try { jsonFile(path.join(folder, 'handoff-request.json'), { requested_at: now(), message: handoffMessage }); }
+      catch (error) { handoffError = String(error); }
+    }, Math.max(0, handoffAt - Date.now()));
     try {
       if (this.args.worker) {
-        await command(this.args.worker[0], this.args.worker.slice(1), { cwd, env, input: prompt, signal: this.signal, timeoutMs: this.args.timeout * 1000, log });
+        try { await command(this.args.worker[0], this.args.worker.slice(1), { cwd, env, input: prompt, signal: this.signal, timeoutMs: this.args.timeout * 1000, log }); }
+        catch (error) { const message = error instanceof Error ? error.message : String(error); throw new WorkerFailure(message, message.startsWith('Command timed out:') ? 'timeout' : 'worker_error', metrics()); }
       } else {
         const result = await runAgent({ client: this.args.client, prompt, workdir: cwd,
           persistSession: this.args.client === 'codex' && extraEnv.TASKMD_WORKER_ROLE === 'task', resumeSessionId,
           model: this.args.model, effort: this.args.effort,
           executable: this.args.client === 'codex' ? path.join(HERE, 'bin/codex-worker.js') : this.args.executable,
           permissions: this.args.permissions, timeoutMs: this.args.timeout * 1000, signal: this.signal,
+          // Tool output is one JSON event; its limit is separate from retained output tails.
+          maxEventBytes: 16 * 1024 * 1024,
           // Preserve Codex's original workspace-write/never policy via a small executable wrapper.
           env: { ...env, TASKMD_CODEX_SANDBOX: this.args.sandbox, TASKMD_CODEX_EXECUTABLE: this.args.executable || 'codex', TASKMD_RESULT_SCHEMA: path.join(HERE, 'result.schema.json') },
           onOutput: chunk => { log.write(chunk); },
@@ -207,14 +225,15 @@ export class Runner {
         jsonFile(path.join(folder, 'agent.json'), { client: result.client, status: result.status, code: result.code, signal: result.signal,
           usage: result.usage, providerThreadId: result.providerThreadId, error: result.error, truncated: result.truncated });
         usage = result.usage; providerThreadId = result.providerThreadId;
-        if (result.status !== 'success') throw new Error(`${this.args.client} ${result.status} (${result.code}); see ${folder}/worker.jsonl`);
+        if (result.status !== 'success') throw new WorkerFailure(`${this.args.client} ${result.status} (${result.code})${result.error ? `: ${result.error}` : ''}; see ${folder}/worker.jsonl`, result.status === 'timed-out' ? 'timeout' : 'worker_error',
+          metrics());
         if (!fs.existsSync(resultFile)) {
           // CLI clients without output-file controls can return a bare or fenced receipt.
           const raw = result.text.trim(); const fenced = raw.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/);
           fs.writeFileSync(resultFile, fenced ? fenced[1] : raw);
         }
       }
-    } finally { log.end(); await finished(log); }
+    } finally { clearTimeout(handoffTimer); log.end(); await finished(log); }
     if (this.args.worker) {
       const totals: Record<string, number> = {};
       for (const line of fs.readFileSync(path.join(folder, 'worker.jsonl'), 'utf8').split('\n')) {
@@ -222,11 +241,8 @@ export class Runner {
       }
       usage = totals;
     }
-    const metrics = {
-      elapsed_seconds: Math.round((performance.now() - started) / 10) / 100, prompt_bytes: Buffer.byteLength(prompt), usage, provider_thread_id: providerThreadId,
-    };
-    try { return { result: validateResult(JSON.parse(fs.readFileSync(resultFile, 'utf8'))), metrics }; }
-    catch (error) { throw new InvalidResponse(error instanceof Error ? error.message : String(error), metrics); }
+    try { return { result: validateResult(JSON.parse(fs.readFileSync(resultFile, 'utf8'))), metrics: metrics() }; }
+    catch (error) { throw new InvalidResponse(error instanceof Error ? error.message : String(error), metrics()); }
   }
   async run(): Promise<number> {
     const lease = new AbortController(), originalSignal = this.signal;
@@ -332,10 +348,7 @@ export class Runner {
             catch (error) { throw new InvalidResponse(error instanceof Error ? error.message : String(error)); }
             if (status === 'pending' && row.task_run >= limit) {
               status = 'blocked'; row.blocked_reason = 'task_run_limit'; row.review_request = limitMessage(row.task_run);
-            } else if (noProgress) {
-              status = 'blocked'; row.blocked_reason = 'no_progress';
-              row.review_request = 'Review required: no new verified progress was reported. The task owner must review the blocker or split the task into subtasks that preserve its original scope and acceptance criteria before retrying.';
-            }
+            } else if (noProgress) row.recovery_reason = 'no_progress';
             await this.record(file, `${status}: ${result.summary}\n\nEvidence: ${result.evidence.join('; ')}\n\nNext: ${result.next_step}`, true, notes);
             if (row.review_request) await this.record(file, row.review_request);
             await this.status(id, status); await this.cli('validate');
@@ -349,11 +362,22 @@ export class Runner {
             break;
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
-            if (error instanceof InvalidResponse) Object.assign(row, error.metrics);
+            if (error instanceof InvalidResponse || error instanceof WorkerFailure) Object.assign(row, error.metrics);
             try { if (fs.existsSync(file)) fs.copyFileSync(file, path.join(folder, 'rejected-task.md')); }
             catch (e) { row.archival_error = String(e); }
             let intact = false;
             try { intact = isDeepStrictEqual(contract(file), before) && readTask(file).meta.status === 'in-progress' && taskRuns(file) === row.task_run; } catch {}
+            if (error instanceof WorkerFailure && intact && !row.archival_error && !this.signal?.aborted && !this.lockError && row.task_run < limit) {
+              Object.assign(row, { status: 'pending', recovery_reason: error.kind, error: message, ended_at: now(), next_action: 'retry_task' });
+              await this.record(file, `Worker attempt interrupted: ${message}. Changes are retained and are not assumed verified. Continue from the current files and retained evidence: ${folder}.`, true);
+              await this.status(id, 'pending'); await this.cli('validate');
+              if (!await this.publishRound(row, folder, file, before)) return await this.finish(this.lockError ? 'lock_lost' : this.signal?.aborted ? 'interrupted' : 'git_sync_error', this.lockError ? 1 : this.signal?.aborted ? 130 : 1);
+              if (this.args.client === 'codex' && !this.args.worker && row.provider_thread_id)
+                this.taskSessions.set(id, { id: row.provider_thread_id, contract: before });
+              else this.taskSessions.delete(id);
+              console.log(JSON.stringify({ event: 'task_retry', task_id: id, round: row.round, reason: error.kind, next_action: 'retry_task' }));
+              break;
+            }
             if (error instanceof InvalidResponse && intact && !row.archival_error && !clarification && !this.signal?.aborted && !this.lockError && row.task_run < limit && (!this.args.rounds || this.rows.length < this.args.rounds)) {
               Object.assign(row, { status: 'invalid_response', error: message, ended_at: now(), next_action: 'clarify_response' });
               jsonFile(path.join(folder, 'receipt.json'), row);

@@ -1,5 +1,148 @@
 # Runner validation
 
+## 0.3.1 patch release
+
+Release the graceful deadline, bounded recovery and JSON-event fixes above.
+Retain the 47 distinct affected runtime/Git checks, the focused resume check,
+and both installed prepared cases. Release metadata changes invalidate version
+and archive evidence only; the new assertion verifies app-server client metadata
+tracks the package version. Build, run the version/CLI-control cases and the
+prepared Codex adapter contract, then verify package/lockfile versions, packed
+CLI version/help and archive content. No full suite or live inference.
+
+Completion requires these checks, whitespace validation, a release commit,
+the v0.3.1 tag and a GitHub release with the package artifact. Registry publication
+is outside this GitHub release. Retain logs and archives under
+`.taskmd-runner/release-0.3.1/`; preserve earlier failure and rollback evidence.
+
+Results: build passed; the three selected release/client-version cases passed
+with zero failures/skips (0.90 seconds). Package, lockfile, archive and CLI versions
+are 0.3.1. The 29-file, 51,010-byte archive matches the current worker wrapper,
+compiled runtime, instructions and release documentation. Extracted version/help
+checks passed using the existing dependency tree; this is not a fresh dependency
+installation check. Installed the archive globally offline with scripts disabled;
+the installed command reports 0.3.1. No live worker or model request was started.
+Whitespace validation passed. No session workers remain; shared services were
+preserved. Removed only the unused 248 KiB extracted inspection copy at
+`.taskmd-runner/release-0.3.1/extracted`; archive and qualification evidence remain.
+Data-volume free space is about 30 GiB. The release manifest records archive
+integrity and publication identifiers after upload.
+
+## Graceful deadline handoff and bounded recovery
+
+Requester correction: request a durable checkpoint before the worker deadline;
+timeouts, worker crashes and pending checkpoints without a new verified slice
+must remain recoverable within the existing task-run budget. An exhausted task
+or explicit blocker yields to independent ready work. A deadline handoff is not
+a new verified result. Keep user interruption, lost ownership, unreconciled state
+and unsafe Git publication as controller stops.
+This supersedes immediate task blocking in the older validation entries below.
+
+Codex uses app-server stdio within the existing adapter-owned worker process.
+It steers the active turn before the deadline; other clients/custom workers
+receive a handoff-request file and instructions to check it before new operations.
+Retain the hard deadline and process-group cleanup for unresponsive workers.
+Preserve the configured Codex credentials, sandbox, never-approval policy, model,
+effort, JSON schema, session resumption and per-turn usage. No new dependency.
+Official protocol: https://learn.chatgpt.com/docs/app-server (thread start/resume,
+turn start/steer/interrupt). Local Codex 0.160.0 generated types confirm the
+request fields, including text_elements. Types are retained in the incident
+directory; no provider request was used for protocol inspection.
+
+Affected checks: build; prepared graceful steer, ignored steer/hard timeout,
+transient crash recovery, restart/cap and no-progress cases; existing Codex
+continuation, adapter, clarification, task-run limits, custom error/timeout,
+scope/status rejection, native worklog, PR-review and interruption selectors.
+The Codex transport and worker-failure routing changed; prior passing evidence
+for those paths is invalidated. Git resolver transport and retry publication
+need their affected cases, not unrelated repository-boundary checks. Reuse
+retained lock, identifier, CLI, Git-boundary and scoped-ownership evidence.
+No full-suite or live inference run. Completion requires selected checks,
+updated worker/user documentation, installed prepared verification and
+whitespace validation. Expect checks to take under one minute. Preserve original
+failures and all logs under `.taskmd-runner/recovery/`.
+
+Results: build passed; 42 selected prepared runner cases passed with zero
+failures/skips (35.33 seconds). Four affected Git cases passed (11.52 seconds),
+including Codex conflict resolution and publication of retryable checkpoints.
+The added native Codex interruption case passed (1.45 seconds), with one attempt,
+no retry and complete process/lease teardown. These are 47 distinct passing
+checks. A focused resumption check passed again (0.88 seconds) after adding
+`excludeTurns: true` to avoid fetching full historical turns during resumption.
+Earlier unaffected evidence is retained; no full suite was run.
+
+Packed and installed the local build offline with lifecycle scripts disabled.
+Two installed-command prepared cases passed: graceful deadline steer followed by
+session resumption, and ignored steer/hard timeout followed by successful retry.
+Both ended with pending/completed receipts and no blocked tasks. Installed
+worker wrapper, compiled runner and worker instructions match the checkout by
+SHA-256. Whitespace and JavaScript syntax checks passed. No provider calls,
+browser sessions, temporary servers or live queue restarts were used. No session
+worker processes remain; shared services were preserved. Evidence/rollback
+artifacts are 3.5 MiB, including 3.0 MiB of local generated protocol types. No
+disposable session artifacts were removed; data-volume free space is about
+30 GiB. Changes in unrelated active workloads were not attributed to this session.
+
+## Timeout incident follow-up (superseded recovery policy)
+
+The stopped Astro launch explicitly supplied `--timeout 1800`; its round 44
+receipt for task 004 records `codex timed-out (124)`, and its summary ends with
+`worker_error`, exit 1. The launch predated the current blocker-continuation
+implementation. Workers default to 7200 seconds, while an explicit 1800
+override still applies. At that checkpoint a task timeout blocked that task,
+retained evidence and selected independent work without retrying the task.
+
+Affected checks: one prepared Codex timeout integration case covering the adapter,
+process cleanup, task counter, blocked dependency, fresh next session and queue
+continuation; retain existing runtime/build results from the JSON-event fix.
+Run the existing custom-worker timeout selector alongside it to cover both worker
+launch paths. No runtime source change or rebuild, broader suite, live inference
+or queue restart is needed. Completion requires both checks and whitespace
+validation; expected runtime under five seconds. Logs are retained under
+`.taskmd-runner/event-limit/`.
+
+Results: both selected timeout cases passed with zero failures/skips (2.40
+seconds). The Codex adapter recorded timeout code 124, reaped the prepared
+worker, blocked only the timed-out task and completed independent work in the
+next round. The dependent task remained pending, the failed task consumed one
+run and the next worker used a fresh session. The installed and checkout runner
+modules have identical SHA-256 hashes. The saved 0.2.0 runtime contains the old
+immediate `finish('worker_error', 1)` path; current code continues selection.
+Whitespace validation passed, and no prepared worker processes remain.
+
+## Worker JSON event limit
+
+Incident: the adapter's default 1 MiB per-event parser limit marks otherwise
+successful workers as failed when a tool emits a large JSON event. Raw worker
+logs already stream to disk independently of retained output. Set a bounded
+16 MiB event allowance for runner workers, retain the adapter's 1 MiB output
+tails, and include the adapter's error in task receipts and summaries. Preserve
+failure handling for oversized events and actual provider failures.
+
+Affected checks: TypeScript build; prepared Codex/Claude large-event cases,
+overflow rejection, provider-error rejection, existing adapter invocation,
+text-receipt fallback and continuation/clarification cases. No live inference,
+browser, server or full-suite run is needed. Completion requires these selected
+checks and whitespace validation. Expected runtime under one minute. Retain
+incident and check evidence under `.taskmd-runner/event-limit/`.
+
+Results: the three new regression cases failed against the prior build (large
+events rejected; parser/provider errors hidden). After the fix, build and all
+16 selected prepared checks passed, with zero failures or skips (6.70 seconds).
+Codex and Claude accept a 2 MiB event, retain truncated output tails, preserve
+usage and stream the full log. A 17 MiB event and provider failures still block
+the task even with a completed receipt and zero process exit.
+
+The installed command was a separate 0.2.0 package. Saved its rollback archive,
+packed this build and installed it globally offline with lifecycle scripts
+disabled. The installed 0.3.0 command completed a prepared 2 MiB-event task.
+Archives, baseline failure, selected checks and installed-command evidence are
+retained in the incident directory. No live worker queues were restarted and no
+provider requests, browsers or temporary servers were launched. Process/listener
+inspection preserved existing Assign services. Data-volume free space is about
+31 GiB; this session's small artifacts are retained verification/rollback evidence,
+with no inactive disposable build trees to remove.
+
 ## 0.3.0 release metadata and package
 
 Reuse the focused runtime results below and the scoped-concurrency receipt at
