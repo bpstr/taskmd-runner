@@ -10,9 +10,11 @@ Select pending taskmd work, claim it, run one worker, validate and repeat.
   --version              Print the installed package version
   --client NAME          ${CLIENT_NAMES.join(', ')} (default codex)
   --rounds N             Maximum worker rounds; 0 drains ready work (default 0)
+  --max-task-runs N      Maximum runs per task across restarts (default 5)
+  --block-after-runs N   Block unfinished tasks after N runs (default 3)
   --filter EXPR          Repeatable taskmd filter
   --task-prefix PATH     Allow a task-directory subtree; repeat for alternatives
-  --timeout SECONDS      Per-worker timeout (default 1800)
+  --timeout SECONDS      Per-worker timeout (default 7200; 2 hours)
   --model NAME           Codex default gpt-6.1-sol; other clients inherit configuration
   --effort LEVEL         Codex default medium; other clients inherit configuration
   --permissions POLICY  default or bypass (explicit unattended permission opt-in)
@@ -32,7 +34,7 @@ Select pending taskmd work, claim it, run one worker, validate and repeat.
   notifications request-permission   macOS notification setup
 `;
 export function parseArgs(argv: string[]): Options {
-  const options: Options = { project: '', taskmd: 'taskmd', filter: [], rounds: 0, timeout: 1800, client: 'codex', sandbox: 'workspace-write', permissions: 'default', notify: 'attention', notifyOn: [], gitSync: false, gitRepo: [], gitConflicts: 'stop' };
+  const options: Options = { project: '', taskmd: 'taskmd', filter: [], rounds: 0, maxTaskRuns: 5, blockAfterRuns: 3, timeout: 7200, client: 'codex', sandbox: 'workspace-write', permissions: 'default', notify: 'attention', notifyOn: [], gitSync: false, gitRepo: [], gitConflicts: 'stop' };
   const strings: Record<string, keyof Options> = { '--project': 'project', '--config': 'config', '--task-dir': 'taskDir', '--state-dir': 'stateDir', '--taskmd': 'taskmd', '--model': 'model', '--effort': 'effort', '--client': 'client', '--sandbox': 'sandbox', '--executable': 'executable', '--permissions': 'permissions', '--notify': 'notify' };
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
@@ -44,6 +46,8 @@ export function parseArgs(argv: string[]): Options {
     else if (flag === '--filter') options.filter.push(value);
     else if (flag === '--task-prefix') (options.taskPrefix ??= []).push(value);
     else if (flag === '--rounds') options.rounds = Number(value);
+    else if (flag === '--max-task-runs') options.maxTaskRuns = Number(value);
+    else if (flag === '--block-after-runs') options.blockAfterRuns = Number(value);
     else if (flag === '--timeout') options.timeout = Number(value);
     else if (flag === '--notify-on') options.notifyOn.push(...value.split(',') as NotificationEvent[]);
     else if (flag === '--git-repo') options.gitRepo.push(value);
@@ -53,6 +57,8 @@ export function parseArgs(argv: string[]): Options {
   if (!options.project) throw new Error('--project is required');
   if (!CLIENT_NAMES.includes(options.client as ClientName)) throw new Error(`Unsupported client: ${options.client}`);
   if (!Number.isSafeInteger(options.rounds) || options.rounds < 0) throw new Error('rounds must be a nonnegative integer');
+  for (const key of ['maxTaskRuns', 'blockAfterRuns'] as const)
+    if (!Number.isSafeInteger(options[key]) || options[key] <= 0) throw new Error(`${key} must be a positive integer`);
   if (!Number.isFinite(options.timeout) || options.timeout <= 0 || !Number.isSafeInteger(options.timeout * 1000) || options.timeout * 1000 > 2147483647) throw new Error('timeout must be positive and fit a Node timer');
   if (!['workspace-write', 'danger-full-access'].includes(options.sandbox)) throw new Error('Invalid sandbox');
   if (!['default', 'bypass'].includes(options.permissions)) throw new Error('Invalid permissions');

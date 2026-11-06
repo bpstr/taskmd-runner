@@ -30,6 +30,28 @@ node bin/taskmd-runner.js --project /path/to/project --client claude --rounds 3 
 The project supplies `.taskmd.yaml`, task files and repository instructions.
 `--rounds 0` (the default) drains ready work. Filters are repeatable and passed
 directly to taskmd. Strict priority ordering preserves phase and dependency gates.
+
+Each task has a maximum of 5 worker runs (`--max-task-runs 5`). Unfinished work
+becomes blocked after 3 runs by default (`--block-after-runs 3`); the lower limit
+applies. A verified partial slice counts as a run. Completion or a valid PR-review
+handoff on the final allowed run is accepted. At the limit, the runner records
+the blocker and requests owner review or splitting into subtasks that collectively
+preserve the original scope and acceptance criteria. This request appears in the
+task handoff and run summary, and in the receipt when a worker reaches the limit.
+The runner selects independent ready work; dependent tasks remain gated.
+These limits are separate from `--rounds`, which caps workers for the whole
+invocation. Each worker has a two-hour timeout by default (`--timeout 7200`),
+allowing up to six hours over three runs. To allow five sessions for a task that has
+been reviewed, raise both thresholds, for example `--block-after-runs 5`.
+
+The runner keeps a `<!-- taskmd-runner runs: N -->` counter under `## Progress`,
+so counts survive restarts, changed evidence directories, Git synchronization
+and worklog compaction. Tasks without a counter start at zero; earlier runs are
+not reconstructed. Preserve the counter when editing handoffs. A blocked task
+requires owner review before explicitly returning it to pending; raise both
+thresholds above its retained count to grant more runs. An already exhausted
+pending task is blocked before another worker starts.
+
 Use repeatable `--task-prefix` options to select task-directory subtrees, for example
 `--task-prefix api --task-prefix astro`. Prefixes are alternatives; normal taskmd
 filters still apply. Selection retains native ordering and the full dependency graph;
@@ -40,12 +62,25 @@ The default Codex sandbox is `workspace-write`; select `danger-full-access` only
 in an environment where the task already authorizes that access. Model and effort
 default to `gpt-6.1-sol` and `medium` for Codex; explicit flags override them.
 Other clients inherit their configuration. `--timeout` bounds each
-worker in seconds (default 1800). `--client` defaults to `codex`; `--model` and
+worker in seconds (default 7200, or two hours). `--client` defaults to `codex`; `--model` and
 `--effort` use these defaults for Codex and are otherwise passed only when supplied. Clients that do not support an effort
 override fail before a task is claimed. Other clients inherit their permission
 configuration; `--permissions bypass` explicitly enables unattended permissions.
 Codex retains the original sandbox and `approval_policy="never"` behavior.
-`--executable` overrides the selected agent binary. Each round is a fresh session.
+`--executable` overrides the selected agent binary. Each task starts a fresh
+session. Workers continue through full task acceptance within the supplied
+deadline; verified slices are checkpoints within execution. Sizing estimates do
+not end a run. A verified partial handoff is for an actual time/context limit,
+with the reason and next edit recorded. Within one runner invocation, Codex
+resumes the task's session after a partial handoff while its contract is unchanged.
+A changed contract or new invocation starts fresh; other clients use the recorded
+checkpoint. An invalid response can receive one clarification turn if the task and
+invocation run budgets allow it. That turn counts as another run, resumes the
+explicit persisted Codex session, or supplies the prior response and evidence
+context to other clients/custom workers in a new session. Clarification corrects
+the handoff only; it cannot implement more work or change scope or acceptance.
+Both attempts retain their own logs, usage and receipts. A second invalid response
+blocks the task and continues independent ready work.
 
 The runner passes [WORKER.md](WORKER.md), the complete task contract and up to
 4 KiB of its latest Progress to a fresh worker. Context files and older receipts
@@ -74,9 +109,12 @@ Transitions:
 | --- | --- | --- |
 | Verified acceptance | pending → in-progress → completed | Select next task |
 | PR-review acceptance + linked real PR | pending → in-progress → in-review | Wait for manual merge disposition |
-| Verified partial slice | in-progress → pending | Continue with a new checked Progress slice and evidence |
+| Time/context limit after verified progress | in-progress → pending | Continue from the checkpoint with retained evidence |
+| Unfinished at the per-task run limit | in-progress → blocked | Continue independent work |
 | Missing prerequisite/input | in-progress → blocked | Continue independent work |
-| Failure, timeout, interruption or invalid result | in-progress → blocked | Stop; inspect evidence before retry |
+| No verified progress, failure or timeout | in-progress → blocked | Record the reason and continue independent work |
+| Invalid result | in-progress → blocked or accepted result | One bounded correction turn; continue independent work if still blocked |
+| Operator interruption or lost lock | in-progress → blocked | Stop explicitly |
 
 Completion requires unchanged task scope, checked criteria and nonempty evidence.
 The worker checks acceptance; the runner validates the result contract. It does not
@@ -85,11 +123,23 @@ Human review remains appropriate before publication. Commits, pushes and deploym
 are manual. PR-review never marks work completed before merge.
 
 Exit 0 means a drained selection or the round limit; inspect the summary reason.
-Exit 2 means unfinished work has no eligible successor, or a pending worker made no
-checked progress. Exit 1 means an error; 130 means worker interruption. Existing
-in-progress/blocked tasks require explicit operator reconciliation. Each physical
-task directory has an advisory process lock; coordinate other tools and worktrees
-through their existing owners. A taskmd failure is an error, never an empty queue.
+Exit 2 means unfinished work has no eligible successor. Blocked tasks and unmet
+dependencies are skipped while independent ready work exists. Task-level errors
+produce a `task_blocked` event with `next_action: select_next_task`, a receipt and
+a summary entry. Stale or unavailable selections produce a `task_skipped` event;
+selection stays bounded. A failed task's Git checkpoint is published before the
+next worker starts. Rejected task-scope changes are archived as `rejected-task.md`
+and the original task contract is restored before continuation.
+Exit 1 means a controller error, such as unrecoverable reconciliation or unsafe Git
+state; 130 means operator interruption. Configured round caps still apply. Existing
+in-progress/blocked tasks require explicit operator reconciliation.
+
+Runs with disjoint `--task-prefix` subtrees can share a physical task directory.
+Equal, ancestor and descendant prefixes conflict, including any overlap in a
+multi-prefix selection. Filters alone grant no concurrent ownership. Runs without
+prefixes and all `--git-sync` runs remain exclusive. Task scopes coordinate task
+claims; coordinate shared source files, other tools and worktrees through their
+existing owners. A taskmd failure is an error, never an empty queue.
 
 ## Git synchronization
 
@@ -168,10 +218,19 @@ and task identifiers, not worker output. On macOS, request authorization with:
 node bin/taskmd-runner.js notifications request-permission
 ```
 
-Exclusive ownership uses a Node lease at `tasks/.taskmd-runner.lease`, refreshed
-every 10 seconds. A hard-crashed owner's lease becomes recoverable after 30
-seconds; normal exit and interruption release it immediately. Stop older 0.1.x
-or Python runners before upgrading: their advisory file lock does not coordinate
+Ownership uses a shared Node lease at `tasks/.taskmd-runner.lease`, refreshed
+every 10 seconds. Its private `owners.json` registry records canonical task
+prefixes and owner heartbeats; a short `tasks/.taskmd-runner.registry.lease`
+serializes claims, heartbeat updates and release. Each crashed owner expires
+after 30 seconds; exiting one scoped run preserves its active peers. Lost or
+expired ownership aborts that runner. Unscoped and Git synchronization runs exclude
+all other scopes.
+
+A live older whole-store Node lease blocks new scoped runs. Stop the old runner
+at a completed-round checkpoint before upgrading; the new shared sentinel also
+blocks old binaries while any scope is active. An abandoned populated registry
+requires a current runner for stale recovery; an old binary fails safely instead
+of deleting it. Stop older 0.1.x or Python runners before upgrading: their advisory file lock does not coordinate
 with this lease. The Python forwarding launcher has been removed; use
 `taskmd-runner` or `node bin/taskmd-runner.js`.
 

@@ -34,6 +34,21 @@ export function progress(file: string, message: string) {
   if (!text.includes('\n## Progress')) text = text.trimEnd() + '\n\n## Progress\n';
   fs.writeFileSync(file, text.trimEnd() + `\n\n${now()} — ${message}\n`);
 }
+const runMarker = /^<!-- taskmd-runner runs: (\d+) -->$/gm;
+export function taskRuns(file: string): number {
+  const journal = readTask(file).body.split('\n## Progress').slice(1).join('\n## Progress');
+  const markers = [...journal.matchAll(runMarker)];
+  const count = markers.length ? Number(markers[0][1]) : 0;
+  if (markers.length > 1 || !Number.isSafeInteger(count)) throw new Error('Invalid task run counter');
+  return count;
+}
+export function setTaskRuns(file: string, count: number) {
+  let text = fs.readFileSync(file, 'utf8').replaceAll('\r\n', '\n');
+  if (!text.includes('\n## Progress')) text = text.trimEnd() + '\n\n## Progress\n';
+  const at = text.indexOf('\n## Progress');
+  const journal = text.slice(at).replace(runMarker, '').trimEnd();
+  fs.writeFileSync(file, text.slice(0, at) + journal + `\n\n<!-- taskmd-runner runs: ${count} -->\n`);
+}
 export function taskContext(file: string): string {
   const text = fs.readFileSync(file, 'utf8');
   const at = text.indexOf('\n## Progress');

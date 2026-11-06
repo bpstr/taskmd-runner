@@ -13,6 +13,12 @@ documentation checks do not authorize changing its intended outcome or weakening
 acceptance. Report conflicts or missing decisions as blockers instead of reframing
 the ticket. Scope changes require an explicit user decision.
 
+Work through the selected task's full acceptance within the supplied worker
+budget. Record verified slices as checkpoints, then continue with the next
+required implementation or affected check in this session. Task sizing estimates
+guide planning; finishing one file, path or test case does not end execution.
+Reserve the supplied handoff time before the deadline for a durable checkpoint.
+
 Before implementation in every round, compare the ticket's objective, scope and
 acceptance with existing canonical specifications and applicable product/API
 documentation. Start with linked context; search the owning documentation only
@@ -48,8 +54,9 @@ provider tests, record live fixtures or use subscription proxies for tests.
 
 Report `completed` only after every checklist and acceptance criterion passes;
 include exact check results or source-bound retained receipts in `evidence`.
-Report `pending` for a verified partial slice with a new checked Progress item and an
-exact next edit. Report `blocked` with the missing input, its owner and retry
+Report `pending` only when the time or context limit requires a handoff after
+verified progress. Record the specific limit, retained evidence and exact next
+edit in Progress and `next_step`. Report `blocked` with the missing input, its owner and retry
 trigger when no selected criterion can advance. Under PR-review, completed work
 requires an actual PR and reports `in-review`; completion waits for merge.
 Adding the real PR URL to the task's `pr` field is the sole metadata exception.

@@ -6,7 +6,7 @@ import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { GitSync } from '../dist/git.js';
 import { acquireTaskLock, taskLease } from '../dist/lock.js';
-import { readTask } from '../dist/task.js';
+import { readTask, setTaskRuns, taskRuns } from '../dist/task.js';
 import { parseArgs } from '../dist/cli.js';
 const ROOT = path.resolve(import.meta.dirname, '..');
 const WORKER = path.join(ROOT, 'tests/git-worker.mjs');
@@ -113,6 +113,38 @@ test('multi-repository workspace commits source and task state in their owning r
   assert.equal(git(code.remote, 'show', 'main:finished.txt'), 'Prepared task 002-task.md');
   assert.match(git(taskRemote, 'show', 'main:002-task.md'), /status: completed/);
 });
+for (const previousRuns of [2, 3]) {
+  test(`task run limits publish a blocked handoff with ${previousRuns} prior runs and continue`, async t => {
+    const base = temporary(t), { repo, remote } = repository(base); tasks(repo, 2);
+    const file = path.join(repo, 'tasks/001-task.md'); setTaskRuns(file, previousRuns);
+    commit(repo); git(repo, 'push');
+    const r = await run(repo, [], { PREPARED_GIT_MODE: 'partial-first' });
+    assert.equal(r.code, 2, r.stderr); assert.equal(r.summary.reason, 'no_ready_tasks');
+    assert.deepEqual(r.summary.rounds.map(row => row.task_id), previousRuns === 2 ? ['001', '002'] : ['002']);
+    assert.equal(taskRuns(file), 3); assert.equal(readTask(file).meta.status, 'blocked');
+    const published = git(remote, 'show', 'main:tasks/001-task.md');
+    assert.match(published, /status: blocked/); assert.match(published, /Task run limit reached \(3\/3\)/);
+    assert.match(published, /review this task or split it into subtasks that collectively preserve the original scope and acceptance criteria/);
+    assert.match(git(remote, 'show', 'main:tasks/002-task.md'), /status: completed/);
+    assert.equal(git(repo, 'status', '--porcelain', '--untracked-files=no'), '');
+    assert.equal(git(remote, 'rev-parse', 'main'), git(repo, 'rev-parse', 'HEAD'));
+  });
+}
+for (const mode of ['pending-first', 'exit-first', 'unrepairable-first', 'scope-first']) {
+  test(`publishes ${mode} as blocked and continues independent Git work`, async t => {
+    const base = temporary(t), { repo, remote } = repository(base); tasks(repo, 2); commit(repo); git(repo, 'push');
+    const r = await run(repo, [], { PREPARED_GIT_MODE: mode, PREPARED_GIT_REPOS: JSON.stringify([repo]) });
+    assert.equal(r.code, 2, r.stderr); assert.equal(r.summary.reason, 'no_ready_tasks');
+    assert.deepEqual(r.summary.rounds.map(row => row.task_id), mode === 'unrepairable-first' ? ['001', '001', '002'] : ['001', '002']);
+    assert.match(git(remote, 'show', 'main:tasks/001-task.md'), /status: blocked/);
+    assert.match(git(remote, 'show', 'main:tasks/002-task.md'), /status: completed/);
+    assert.doesNotMatch(git(remote, 'show', 'main:tasks/001-task.md'), /# Changed scope/);
+    assert.equal(r.summary.blocked_tasks.length, 1);
+    assert.equal(r.summary.rounds.at(-1).git_sync, 'pushed');
+    assert.equal(git(repo, 'status', '--porcelain', '--untracked-files=no'), '');
+    assert.equal(git(remote, 'rev-parse', 'main'), git(repo, 'rev-parse', 'HEAD'));
+  });
+}
 test('push rejection preserves completed task and local commit and stops the next worker', async t => {
   const base = temporary(t), { repo, remote } = repository(base); tasks(repo, 2); commit(repo); git(repo, 'push');
   fs.writeFileSync(path.join(remote, 'hooks/pre-receive'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });

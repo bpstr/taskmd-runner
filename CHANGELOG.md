@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.0 — 2026-11-06
+
+- Allow runners with disjoint task prefixes to share a task directory while
+  preserving exclusive ownership for overlapping scopes and Git synchronization.
+- Persist per-task run counts, with configurable limits and owner review requests
+  when unfinished tasks reach their limit.
+- Continue independent work after task-level blockers and worker failures;
+  preserve rejected handoffs and allow one bounded response clarification.
+- Keep workers focused on full task acceptance within their budget, reuse Codex
+  sessions for partial continuations, and increase the default timeout to two hours.
+
 ## 0.2.1 — 2026-11-05
 
 - Keep workers within the ticket's stated outcome and acceptance criteria.

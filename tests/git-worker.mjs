@@ -34,7 +34,7 @@ if (process.env.TASKMD_WORKER_ROLE === 'git-conflict') {
 } else {
   for (const repo of JSON.parse(process.env.PREPARED_GIT_REPOS || '[]')) fs.writeFileSync(path.join(repo, 'finished.txt'), `Prepared task ${path.basename(process.env.TASKMD_TASK_FILE)}\n`);
   if (process.env.PREPARED_GIT_STAGE) git(process.cwd(), ['add', 'finished.txt']);
-  const child = spawnSync(process.execPath, [path.join(import.meta.dirname, 'fake-worker.mjs'), 'completed'], { input: prompt, encoding: 'utf8', env: { ...process.env, PREPARED_MODE: 'completed' } });
+  const child = spawnSync(process.execPath, [path.join(import.meta.dirname, 'fake-worker.mjs'), 'completed'], { input: prompt, encoding: 'utf8', env: { ...process.env, PREPARED_MODE: process.env.PREPARED_GIT_MODE || 'completed' } });
   if (child.status !== 0) { process.stderr.write(child.stderr); process.exit(child.status || 1); }
   if (process.env.PREPARED_GIT_ADVANCE_PEER) {
     const peer = process.env.PREPARED_GIT_ADVANCE_PEER, file = path.relative(process.cwd(), process.env.TASKMD_TASK_FILE);

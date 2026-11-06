@@ -1,5 +1,187 @@
 # Runner validation
 
+## 0.3.0 release metadata and package
+
+Reuse the focused runtime results below and the scoped-concurrency receipt at
+`.taskmd-runner/scoped-concurrency-verification.json` (10 lock cases, 16 integration
+cases and one scoped-runner case). Release preparation changes package versions
+and release documentation only. Verify the TypeScript build, package-version and
+CLI-control cases, matching package/lockfile versions, and packed CLI version/help.
+Inspect the archive for the updated worker instructions and compiled runtime.
+Completion requires these checks and a clean whitespace check; no full-suite run,
+live worker, provider request or registry publication is needed. Retain logs and
+the archive under `.taskmd-runner/release-0.3.0/`.
+
+Results: build passed; the two selected CLI/version cases passed with zero
+failures or skips (0.13 seconds). Package and lockfile versions match 0.3.0.
+The 29-file, 47,639-byte archive contains the compiled runtime and current worker
+instructions; its extracted CLI passes version/help using the existing dependency
+tree. This is not a fresh dependency-install check. Whitespace validation passed.
+No model calls, test browsers or temporary servers were started. The existing
+Assign Vite server was preserved. Removed only the 236 KiB extracted inspection
+copy at `.taskmd-runner/release-0.3.0/extracted`; archive and evidence remain.
+Data-volume free space was approximately 27.3 GiB; no broader cleanup was done.
+
+## Completion-oriented execution
+
+Requester clarification, 6 November: keep small-task sizing guidance, while
+execution continues through the task's full acceptance within the worker budget.
+Verified slices are internal checkpoints. Pending handoffs require a genuine
+time/context limit, with the reason, evidence and next edit recorded. Supply the
+deadline and a bounded handoff reserve; keep task acceptance unchanged.
+
+Codex now reuses a task's provider session for necessary partial continuations
+within one invocation. Clear it on a new/changed task contract, unavailable claim,
+completion or blocker. Keep other clients' supported behavior and existing
+clarification/cap semantics. The response schema is unchanged.
+
+Selected checks: build; prepared partial-resume/new-task/reset cases, existing
+partial/worklog/restart/run-limit cases, adapter contracts and clarification cases.
+Retain the passing Git/lease/error-continuation checks whose implementations are
+unchanged. Separately validate Assign's task collection, exact execution-line-only
+amendments, preserved frontmatter/checkmarks/Progress, and instruction consistency.
+Keep authoring sizing estimates and product criteria. No application suites,
+full runner suite or live inference. Completion requires these focused checks
+and structural document checks; expected cost under one minute.
+
+Results: build passed; 25 selected prepared cases passed with zero failures/skips
+(11.37 seconds). New cases verify partial-session resumption, fresh sessions for
+the next task and changed contract, and the supplied deadline/reserve. Existing
+adapter, clarification, cap, worklog and restart selectors remain compatible.
+Logs: `.taskmd-runner/efficiency-review/build.log` and `runner-checks.log`.
+Workspace collection validation and execution-wording checks passed; product
+requirements and sizing guidance were retained. A concurrently active worker's
+captured contract was preserved for a safe handoff. No live model was invoked
+for validation; actual delivery-time improvement remains unmeasured.
+
+## Blocker continuation and response clarification
+
+Task-level no-progress, worker failures/timeouts and rejected handoffs become
+blocked, preserve receipts and select independent work. Emit explicit blocked
+and continuation events. Recheck unavailable selections without spinning, and
+publish failed-task checkpoints before the next Git boundary. Archive rejected
+task edits and restore the original contract before continuing. Interruption,
+lost ownership, reconciliation failures and unsafe Git state remain explicit
+controller stops, as do configured invocation round caps.
+
+Allow one clarification turn for an invalid response when both task and invocation
+run budgets permit it. Charge it as a separate run. Resume the explicit persisted
+Codex session; other clients/custom workers receive prior response and evidence
+context in a new turn. Clarification may correct the response and Progress only;
+it cannot implement more work, change scope, invent evidence or extend budgets.
+Preserve the original invalid receipt and usage. Use general contract validation,
+without a formatting-specific parser exception. Adapter 0.1.0's installed primary
+README/types document Codex-only continuation; no Context7 tool is advertised.
+
+Selected checks: build; affected blocked/no-progress/error/documentation cases,
+generic clarification success/failure/budget cases with prepared custom and
+adapter processes, unavailable-selection/dependency races, scope restoration,
+existing run-limit and interruption cases. Local Git fixtures cover failed-task
+publication before independent work plus existing push/conflict safety gates
+affected by the shared publication helper. Retain prior CLI/lock/selection evidence
+outside these boundaries; no full suite or inference. Expected cost: under two
+minutes. Completion requires zero failures in these focused lanes.
+
+Initial results: build passed, 38 selected runner cases passed (16.86 seconds)
+and 12 selected Git cases passed (29.70 seconds), all with zero failures/skips.
+Logs: `.taskmd-runner/task-run-limits/build-continuation.log`,
+`continuation-runner.log` and `continuation-git.log`.
+
+Final evidence inspection found that native worklog compaction after successful
+clarification could discard the original rejected Progress notes. Archive every
+rejected handoff's task snapshot before clarification/reconciliation. Strengthen
+the existing custom-worker clarification case to use native worklogs and verify
+the snapshot. Rebuild and rerun only that case, the scope-restoration case and its
+Git publication counterpart, whose archival path changed. Retain the other
+passing results; this evidence-only follow-up does not require another broad run.
+
+Final results: rebuilt successfully; the two affected runner cases passed
+(0.83 seconds) and the Git counterpart passed (2.66 seconds), with zero failures
+or skips. The original 50 affected checks plus these compatible follow-ups
+satisfy the selected completion gate. Logs: `build-continuation-evidence.log`,
+`continuation-evidence-runner.log` and `continuation-evidence-git.log` in the same
+evidence directory. The installed Codex CLI accepted the resumed invocation's
+parent options in a help-only parse (`codex-resume-help.log`); no model request
+was made. Build/test lanes used prepared workers only. Diff whitespace check
+passed. No formatting-specific parser change or fixture was introduced.
+Teardown found no remaining test processes; no browser or temporary server was
+started. Data volume free space: 28.7 GiB. Compiled output is approximately
+112 KiB and retained session evidence approximately 324 KiB; no disposable large
+session artifacts were identified, no paths were removed and no space reclamation
+is claimed. Existing services were preserved.
+
+## Two-hour default timeout
+
+Change the default per-worker timeout from 1800 to 7200 seconds, with matching
+help and README text. Explicit timeout overrides and timer handling are unchanged.
+Verify the build, the existing CLI-control case with default/override assertions,
+and installed CLI help. Retain prior worker timeout/teardown and run-limit
+evidence; no worker launches, inference or broad tests are needed. Expected cost:
+under two seconds; completion requires all selected checks to pass.
+
+Results: build passed; selected CLI case passed (one pass, zero failures/skips,
+0.09 seconds), including 7200-second default and explicit 60-second override.
+CLI help reports `default 7200; 2 hours`; diff whitespace check passed. Logs are
+retained under `.taskmd-runner/task-run-limits/` as `build-timeout.log`,
+`timeout-cli.log` and `timeout-help.log`. No worker or temporary server started.
+
+## Run-limit review request follow-up
+
+Run-limit handoffs now request owner review or subdivision into subtasks that
+collectively preserve the original scope and acceptance criteria. Remove the
+previous suggestion to re-scope. Persist the review request in the task handoff,
+blocked-task summary and terminal worker receipt; keep raw worker results intact.
+Verify the build and existing newly exhausted, already exhausted, native-worklog
+and two Git publication cases with strengthened review-request assertions.
+Completion requires these five focused prepared cases to pass. Retain prior
+counter/CLI/adapter evidence; no full suite or live inference is required.
+
+Results: build passed; three runner cases and two Git publication cases passed
+with zero failures/skips (1.73 and 5.23 seconds). Assertions cover the handoff,
+native worklog, blocked-task summary, saved worker receipt and published task.
+Logs: `.taskmd-runner/task-run-limits/build-review.log`, `review-runner.log` and
+`review-git.log`. Diff whitespace check passed. No live inference was used.
+
+## Per-task run limits
+
+Changed behavior: persistent per-task run counters, default maximum 5 and default
+unfinished-work blocking threshold 3. The lower threshold applies; limit blocking
+continues independent work without consuming an extra worker round. Completion
+and PR-review handoffs on the last allowed run remain valid. Counters survive
+restarts, state-directory overrides and native worklog compaction, and are
+preserved on worker errors. Existing interruption/error stop behavior remains.
+
+Selected verification: TypeScript build; prepared run-limit cases for CLI bounds,
+thresholds, independent successors/dependents, restarts, worklogs, final-run
+completion and counter tampering; existing round-cap, partial-progress,
+no-progress, blocked, error/timeout, PR-review and adapter cases. Local bare Git
+fixtures cover publishing a newly exhausted task and a previously exhausted task
+without another worker. Reuse prior unaffected selection, locking and packaging
+evidence. Expected cost: under two minutes. Completion requires these focused
+checks with zero failures; no full suite, credentials, live clients or inference.
+
+Initial results: build and 23 selected runner cases passed (zero failures/skips,
+9.23 seconds). Two existing Git publication/error checks passed; both new Git
+limit cases reached the expected published states but failed their final clean
+tree assertion on the intentionally untracked evidence directory. Restrict that
+assertion to tracked changes and compare remote/local HEADs, then rerun only
+those two cases. An existing CRLF counter exposed a concrete line-ending gap in
+counter replacement; normalize line endings as task parsing already does and
+run the new CRLF case. Retain the passing LF-input and orchestration evidence;
+no broader run is required by these changes.
+
+Final results: the two corrected Git cases passed (zero failures/skips,
+4.96 seconds), as did the new CRLF case (one pass, zero failures/skips,
+0.36 seconds). The build passed after line-ending normalization. Combined with
+retained passing results above, 28 distinct affected checks pass. Original Git
+assertion failures remain in `.taskmd-runner/task-run-limits/git.log`; corrected
+results are in `git-rerun.log`, with runner/build/CRLF logs beside them.
+No test processes or temporary servers remain. Existing Assign runner and shared
+services were preserved; already running controllers load the new policy only
+after restart. Data volume free space: 27.5 GiB. Session artifacts are limited to
+the approximately 104 KiB compiled runtime and small retained verification logs;
+no inactive disposable session artifacts were identified or removed.
+
 ## 0.2.1 instruction patch
 
 Changed behavior: worker instructions preserve the ticket's intended outcome and
