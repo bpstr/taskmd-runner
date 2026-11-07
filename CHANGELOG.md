@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.3 — 2026-11-07
+
+- Reference task files instead of embedding their contents in each worker prompt;
+  keep stable instructions and the result schema ahead of changing run details.
+- Keep up to two early checkpoint continuations within one charged task run and
+  its original deadline, with separate receipts and retained usage telemetry.
+- Remove the worker's precautionary context stopping rule. Start fresh Codex
+  history for context handoffs and explicit provider context-overflow recovery;
+  preserve near-deadline safe stops and durable run limits.
+
 ## 0.3.2 — 2026-11-06
 
 - Isolate Codex worker sessions under each runner's state directory by default,

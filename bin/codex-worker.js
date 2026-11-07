@@ -20,6 +20,7 @@ const emit = event => process.stdout.write(JSON.stringify(event) + '\n');
 const pending = new Map();
 const serverLog = fs.createWriteStream(path.join(process.env.TASKMD_ROUND_DIR, 'codex-server.jsonl'));
 let nextId = 0, threadId, turnId, finalText = '', usage, ended = false, handoffTimer, shutdownTimer;
+let peakInputTokens = 0;
 const send = message => child.stdin.write(JSON.stringify(message) + '\n');
 const request = (method, params) => new Promise((resolve, reject) => {
   const id = ++nextId; pending.set(id, { resolve, reject });
@@ -62,7 +63,14 @@ const receive = message => {
   if (p.threadId && threadId && p.threadId !== threadId) return;
   if (p.turnId && turnId && p.turnId !== turnId) return;
   if (message.method === 'item/completed' && p.item?.type === 'agentMessage') finalText = p.item.text;
-  if (message.method === 'thread/tokenUsage/updated') usage = p.tokenUsage?.last;
+  if (message.method === 'thread/tokenUsage/updated') {
+    usage = p.tokenUsage?.last;
+    peakInputTokens = Math.max(peakInputTokens, usage?.inputTokens || 0);
+    fs.writeFileSync(path.join(process.env.TASKMD_ROUND_DIR, 'context.json'), JSON.stringify({
+      last_input_tokens: usage?.inputTokens ?? null, peak_input_tokens: peakInputTokens,
+      model_context_window: p.tokenUsage?.modelContextWindow ?? null,
+    }));
+  }
   if (message.method === 'turn/completed') {
     if (ended) return;
     if (turnId && p.turn?.id !== turnId) return;

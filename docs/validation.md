@@ -1,5 +1,103 @@
 # Runner validation
 
+## 0.3.3 GitHub release
+
+Release scope: issue #2 continuation/context recovery and task-file prompt
+references. Reuse the 41 distinct issue #2 prepared checks and 12 task-reference
+checks below, with their documented retained results and assertion corrections.
+Only version metadata changes for release: build, select the package-version
+check, pack and compare every archived file with the checkout, then install the
+archive offline and check version/help plus two prepared installed CLI scenarios
+for early/context handoffs and task references. No full suite, provider call,
+registry publication or active-queue restart. Completion requires the release
+commit, v0.3.3 tag and GitHub release with the verified package archive attached.
+Artifacts: `.taskmd-runner/release-0.3.3/`.
+
+Results: build, version selector, installed version/help and whitespace checks
+passed. Both offline-installed prepared scenarios passed: two early checkpoints
+completed inside one charged run; two early context handoffs plus a genuine
+near-deadline stop used two charged runs, preserving the original deadline and
+private Codex profile. Every dispatch referenced the task file without embedding
+its contents. All 32 archived files match both the checkout and offline install.
+Archive size: 56,160 bytes; SHA-256:
+`ab33980dd6b51577909b3514fcdfde0bfa76907ecc49d7f73df2307b02e86afc`.
+No prepared workers, browsers or temporary servers remain. Release evidence uses
+about 2.3 MiB; data-volume free space remains 25 GiB. No paths were removed or
+unrelated resources cleaned. The archive and manifest retain the release proof.
+
+## Task-file prompt references
+
+Plan: reference the selected task path and TASKMD_TASK_FILE instead of embedding
+its body. Put the stable worker instructions and result schema before variable
+dispatch metadata. Workers read scope/acceptance and latest Progress from disk
+with bounded reads. File reads still consume context; no cache savings are claimed
+without provider usage evidence. Official reference:
+[exact-prefix cache reuse](https://developers.openai.com/api/docs/guides/prompt-caching/diagnostics#how-it-works).
+
+Verification: build; a prepared task with large scope/history and a filesystem
+path containing spaces must complete through file reads, preserve its contract,
+and keep task text out of every dispatch prompt. Check stable prompt prefixes,
+same-session/context continuation, clarification, worklogs and the custom/Codex
+Git resolver fixture because it forwards task prompts. Reuse the issue #2 budget,
+cancellation, counter and unrelated runtime evidence below. No full suite or paid
+provider calls. Logs: `.taskmd-runner/issue-2/task-reference-*.log`.
+
+Results: build, syntax and whitespace checks passed. Eleven selected prepared
+checks passed immediately. The new file-reference check initially compared a
+macOS `/var` fixture path with the runner's canonical `/private/var` path; after
+canonicalizing that assertion, its focused rerun passed. All 12 affected checks
+now pass, with the original failure retained. The reference check verifies three
+dispatches, a path containing spaces, preserved large task scope, excluded task
+text/history, and an identical prefix through the task path. No live cache or
+provider-quality claim. No browsers, servers or workers remained from these
+checks. Session artifacts remained under 1 MiB; free data-volume space was 25 GiB
+and no paths were removed.
+
+## Issue #2: premature context handoffs
+
+Plan: allow at most two early pending continuations inside one charged task run,
+sharing its original absolute deadline. Preserve each dispatch and its reason,
+remaining budget and context telemetry. Near-deadline stops include a small safety
+margin before the warning; an unset warning flag alone does not imply an early
+exit. Recover context-labelled stops in a fresh Codex thread, retaining durable
+Progress rather than assuming same-thread resume relieves context pressure.
+
+Affected verification: build; prepared early-pending, context-pressure,
+near-deadline (including two early stops then a safe stop), cancellation,
+continuation failure/clarification, same-task session, durable run-limit and
+worklog selectors. Reuse unaffected task selection, adapter-control, Git-sync,
+notification and locking evidence above/below. No full suite or live provider
+call is required. Completion requires bounded dispatches, unchanged total time
+and run budgets, retained individual receipts and focused passing checks.
+Logs: `.taskmd-runner/issue-2/`.
+
+Issue #2 verification checkpoint: the initial affected selection passed 22/22;
+additional recovery, clarification, cancellation, deadline-steer, isolated/shared
+session, contract reset, large-event, documentation guard and PR-review checks
+passed 17/17 (one overlapping early-checkpoint case). An initial TypeScript build
+caught an optional-context narrowing error; corrected before tests. Keep logs.
+Final review tightened dispatch timeout calculation to the original absolute
+deadline and rechecks the reserve after checkpoint I/O. This invalidates only
+deadline/timeout dispatch evidence; rerun early/mixed handoffs, timeout and steer
+checks plus the shared Git conflict-worker dispatch case. Retain the other
+compatible passing results; no broad rerun. Expected cost: under 15 seconds.
+
+Results: build and whitespace checks passed. Across the affected selections,
+41 distinct prepared checks passed with zero failures or skips. The seven
+absolute-deadline and shared custom/Codex Git resolver checks passed; the final
+six-check selection passed after replacing token-threshold inference with explicit
+provider-overflow recovery. Retain compatible earlier results rather than rerun
+unchanged checks. Both early context reports followed by a near-deadline stop and
+an explicit provider-overflow error preserve the intended time/run accounting.
+Telemetry alone never imposes a context-token budget or proves provider failure.
+
+The [official app-server API overview](https://learn.chatgpt.com/docs/app-server#api-overview)
+documents resume as appending to existing history and compaction as a separate
+operation. Workers retain native compaction; context handoffs use fresh history.
+No provider calls, browser sessions or temporary servers were started. No prepared
+worker processes remained after teardown. Data-volume free space was 25 GiB;
+session outputs were under 1 MiB, with no cleanup candidates or paths removed.
+
 ## 0.3.2 session isolation and release
 
 Issue #1: persistent workers saved conversations into the inherited desktop

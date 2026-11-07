@@ -49,18 +49,3 @@ export function setTaskRuns(file: string, count: number) {
   const journal = text.slice(at).replace(runMarker, '').trimEnd();
   fs.writeFileSync(file, text.slice(0, at) + journal + `\n\n<!-- taskmd-runner runs: ${count} -->\n`);
 }
-export function taskContext(file: string): string {
-  const text = fs.readFileSync(file, 'utf8');
-  const at = text.indexOf('\n## Progress');
-  if (at < 0 || Buffer.byteLength(text.slice(at + 12)) <= 4096) return text;
-  const paragraphs: string[] = []; let size = 0;
-  for (const paragraph of text.slice(at + 12).trim().split('\n\n').reverse()) {
-    const cost = Buffer.byteLength(paragraph) + 2;
-    if (size + cost > 4096) {
-      if (!paragraphs.length) paragraphs.push(Buffer.from(paragraph).subarray(-4094).toString('utf8').replace(/^\uFFFD+/, ''));
-      break;
-    }
-    paragraphs.push(paragraph); size += cost;
-  }
-  return text.slice(0, at) + '\n## Progress (latest checkpoint; earlier history remains in the task file)\n\n' + paragraphs.reverse().join('\n\n');
-}

@@ -76,7 +76,21 @@ for a checkpoint: Codex receives an active-turn message through app-server; othe
 clients and custom workers check the supplied handoff-request file. Unresponsive
 workers still have a hard deadline. Within one runner invocation, Codex resumes
 the task's session after a handoff or recoverable worker failure while its
-contract is unchanged.
+contract is unchanged. Early `pending` returns receive at most two continuations
+inside that same charged task run, sharing its original deadline. Each dispatch
+keeps its own receipt under the round directory; invocation round caps and durable
+task-run limits still apply. Stops within the handoff reserve plus a small safety
+margin are accepted as deadline handoffs even before the warning fires. The runner
+imposes no context-token budget. Context-labelled handoffs and explicit provider
+context-overflow errors start a fresh Codex thread from durable Progress instead of replaying the
+same history. Receipts distinguish reported concerns from observed usage; neither
+token counts nor a normal pending return establish a provider context failure.
+
+Task prompts reference the task file through its path and `TASKMD_TASK_FILE`.
+Workers read its requirements and latest Progress from disk using bounded reads.
+The stable worker instructions and result schema precede changing run details;
+the task body and accumulated history are not copied into each launch prompt.
+Reading files still consumes context, and cache savings depend on provider reuse.
 
 By default, Codex workers use a private `codex-home/` inside the runner's run
 directory, including when `--state-dir` is supplied. Persistent sessions and

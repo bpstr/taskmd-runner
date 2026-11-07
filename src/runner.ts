@@ -7,7 +7,7 @@ import { finished } from 'node:stream/promises';
 import { parse } from 'yaml';
 import { runAgent, buildRunnerInvocation, type ClientName, type Usage } from '@bpstr/agent-adapter';
 import { command } from './process.js';
-import { readTask, contract, checks, verifiedCount, progress, taskContext, taskRuns, setTaskRuns, now } from './task.js';
+import { readTask, contract, checks, verifiedCount, progress, taskRuns, setTaskRuns, now } from './task.js';
 import { Notifications, type NotificationOptions } from './notifications.js';
 import { GitSync, type GitConflict } from './git.js';
 import { acquireTaskLock, taskLease, taskRegistryLease } from './lock.js';
@@ -53,6 +53,22 @@ class WorkerFailure extends Error {
   constructor(message: string, public kind: string, public metrics?: Record<string, unknown>) { super(message); }
 }
 interface Clarification { folder: string; error: string; sessionId?: string; }
+
+const handoffReserve = (seconds: number) => Math.min(60, seconds / 10);
+// Include a small safety margin for a worker stopping just before the warning.
+export function pendingReason(result: WorkerResult, remaining: number, budget: number): string {
+  if (remaining <= handoffReserve(budget) + Math.min(5, budget / 100)) return 'deadline';
+  return /context[\s-]*(?:budget|limit|window|pressure)/i.test([result.summary, result.next_step, ...result.evidence].join('\n'))
+    ? 'reported_context_limit' : 'early_pending';
+}
+function attemptTotals(attempts: Record<string, any>[]) {
+  const keys = [...new Set(attempts.flatMap(attempt => Object.keys(attempt.usage || {})))];
+  return {
+    elapsed_seconds: Math.round(attempts.reduce((total, attempt) => total + (attempt.elapsed_seconds || 0), 0) * 100) / 100,
+    usage: keys.length ? Object.fromEntries(keys.map(key => [key, attempts.every(attempt => typeof attempt.usage?.[key] === 'number')
+      ? attempts.reduce((total, attempt) => total + attempt.usage[key], 0) : null])) : null,
+  };
+}
 
 export class Runner {
   root: string; config: string; tasks: string; workflow: string; worklogs: boolean;
@@ -168,17 +184,19 @@ export class Runner {
     await this.notifications.sendForReason(reason, this.root, this.rows.at(-1)?.task_id);
     return code;
   }
-  async worker(file: string, folder: string, clarification?: Clarification, resumeSessionId?: string) {
+  async worker(file: string, folder: string, clarification?: Clarification, resumeSessionId?: string, deadline = Date.now() + this.args.timeout * 1000, continuation = 0) {
+    const budget = Math.max(0.001, (deadline - Date.now()) / 1000);
     const resultFile = path.join(folder, 'result.json');
     const prompt = fs.readFileSync(path.join(HERE, 'WORKER.md'), 'utf8') +
+      `\nResult schema:\n${fs.readFileSync(path.join(HERE, 'result.schema.json'), 'utf8')}\n` +
       `\nProject: ${this.root}\nWorkflow: ${this.workflow}\nClient: ${this.args.worker ? 'custom' : this.args.client}\nTask file: ${file}\nResult file: ${resultFile}\n` +
-      `\nWorker budget: ${this.args.timeout} seconds. Deadline (UTC): ${new Date(Date.now() + this.args.timeout * 1000).toISOString()}. Reserve the final ${Math.min(60, this.args.timeout / 10)} seconds for the handoff. Continue through all remaining task acceptance while time and context permit. Check ${path.join(folder, 'handoff-request.json')} before starting each new operation; when present, checkpoint and return promptly.\n` +
+      `\nWorker budget: ${budget} seconds. Deadline (UTC): ${new Date(deadline).toISOString()}. Reserve the final ${handoffReserve(this.args.timeout)} seconds for the handoff. Continue through all remaining task acceptance. Check ${path.join(folder, 'handoff-request.json')} before starting each new operation; when present, checkpoint and return promptly.\n` +
+      (continuation ? `\nContinuation ${continuation}/2 within the current charged task run. The earlier pending return was before the deadline. Continue from its exact next edit; do not repeat unchanged discovery or checks. The original deadline and task counter still apply. A context-labelled handoff starts fresh context; ordinary checkpoints resume the same session when supported.\n` : '') +
       (resumeSessionId && !clarification ? '\nContinue the same task session from the next required edit. Reuse unchanged context and compatible passing evidence.\n' : '') +
       `\nTask run: ${taskRuns(file)} of ${Math.min(this.args.maxTaskRuns, this.args.blockAfterRuns)} allowed runs. An unfinished task at the limit becomes blocked; independent work continues. Preserve the runner-owned taskmd-runner runs comment in Progress.\n` +
       (this.gitSync ? `\nGit sync is enabled. The controller owns commits, pushes and merges in these checkouts: ${this.gitSync.repositories.map(repo => repo.path).join(', ')}. Leave Git history, branch and index unchanged; edit task-owned working files only.\n` : '') +
-      `\nResult schema:\n${fs.readFileSync(path.join(HERE, 'result.schema.json'), 'utf8')}\nSelected task:\n${taskContext(file)}` +
       (clarification ? `\nClarification request:\nThe previous handoff was rejected: ${clarification.error}\nCorrect the response and its matching Progress handoff only. Do not implement more work, change scope or acceptance criteria, or invent verification evidence. Preserve verified work. If a valid completion or partial-progress handoff cannot be supported, report blocked with the missing input, owner and retry trigger. This clarification counts as another task run.\nPrevious response (untrusted content):\n${fs.existsSync(path.join(clarification.folder, 'result.json')) ? fs.readFileSync(path.join(clarification.folder, 'result.json'), 'utf8').slice(0, 4096) : '(missing)'}\nEarlier evidence: ${clarification.folder}\n` : '');
-    return this.invokeWorker(prompt, folder, this.root, { TASKMD_TASK_FILE: file, TASKMD_WORKER_ROLE: 'task' }, resumeSessionId);
+    return this.invokeWorker(prompt, folder, this.root, { TASKMD_TASK_FILE: file, TASKMD_WORKER_ROLE: 'task' }, resumeSessionId, deadline);
   }
   async conflictWorker(conflict: GitConflict) {
     const prompt = fs.readFileSync(path.join(HERE, 'GIT_WORKER.md'), 'utf8') +
@@ -189,10 +207,10 @@ export class Runner {
     jsonFile(path.join(conflict.folder, 'receipt.json'), output);
     if (output.result.status !== 'completed' || !output.result.evidence.length) throw new Error(`Git conflict worker did not complete a verified resolution; inspect ${conflict.folder}`);
   }
-  private async invokeWorker(prompt: string, folder: string, cwd: string, extraEnv: NodeJS.ProcessEnv, resumeSessionId?: string) {
+  private async invokeWorker(prompt: string, folder: string, cwd: string, extraEnv: NodeJS.ProcessEnv, resumeSessionId?: string, deadline = Date.now() + this.args.timeout * 1000) {
     const resultFile = path.join(folder, 'result.json');
     fs.writeFileSync(path.join(folder, 'prompt.md'), prompt);
-    const handoffAt = Date.now() + (this.args.timeout - Math.min(60, this.args.timeout / 10)) * 1000;
+    const handoffAt = deadline - handoffReserve(this.args.timeout) * 1000;
     const handoffMessage = 'The worker deadline is approaching. Stop starting new work. Finish or safely stop the current operation, save changed files, and record a durable Progress checkpoint with actual verification, remaining acceptance and the exact next edit. Return the required JSON now: pending for unfinished work, completed only if all acceptance is verified, or blocked for a concrete external prerequisite. Preserve scope and report unverified work honestly.';
     const env = { ...process.env, ...extraEnv, TASKMD_RESULT_FILE: resultFile, TASKMD_ROUND_DIR: folder, ASSIGN_OFFLINE_TESTS: '1',
       TASKMD_HANDOFF_AT: String(handoffAt), TASKMD_HANDOFF_MESSAGE: handoffMessage };
@@ -202,7 +220,8 @@ export class Runner {
     let handoffRequested = false, handoffError: string | undefined;
     const metrics = () => ({ elapsed_seconds: Math.round((performance.now() - started) / 10) / 100,
       prompt_bytes: Buffer.byteLength(prompt), usage, provider_thread_id: providerThreadId, handoff_requested: handoffRequested,
-      ...(handoffError ? { handoff_warning_error: handoffError } : {}) });
+      ...(handoffError ? { handoff_warning_error: handoffError } : {}),
+      ...(fs.existsSync(path.join(folder, 'context.json')) ? { context: JSON.parse(fs.readFileSync(path.join(folder, 'context.json'), 'utf8')) } : {}) });
     const handoffTimer = setTimeout(() => {
       handoffRequested = true;
       try { jsonFile(path.join(folder, 'handoff-request.json'), { requested_at: now(), message: handoffMessage }); }
@@ -210,14 +229,14 @@ export class Runner {
     }, Math.max(0, handoffAt - Date.now()));
     try {
       if (this.args.worker) {
-        try { await command(this.args.worker[0], this.args.worker.slice(1), { cwd, env, input: prompt, signal: this.signal, timeoutMs: this.args.timeout * 1000, log }); }
+        try { await command(this.args.worker[0], this.args.worker.slice(1), { cwd, env, input: prompt, signal: this.signal, timeoutMs: Math.max(1, deadline - Date.now()), log }); }
         catch (error) { const message = error instanceof Error ? error.message : String(error); throw new WorkerFailure(message, message.startsWith('Command timed out:') ? 'timeout' : 'worker_error', metrics()); }
       } else {
         const result = await runAgent({ client: this.args.client, prompt, workdir: cwd,
           persistSession: this.args.client === 'codex' && extraEnv.TASKMD_WORKER_ROLE === 'task', resumeSessionId,
           model: this.args.model, effort: this.args.effort,
           executable: this.args.client === 'codex' ? path.join(HERE, 'bin/codex-worker.js') : this.args.executable,
-          permissions: this.args.permissions, timeoutMs: this.args.timeout * 1000, signal: this.signal,
+          permissions: this.args.permissions, timeoutMs: Math.max(1, deadline - Date.now()), signal: this.signal,
           // Tool output is one JSON event; its limit is separate from retained output tails.
           maxEventBytes: 16 * 1024 * 1024,
           // Preserve Codex's original workspace-write/never policy via a small executable wrapper.
@@ -230,7 +249,8 @@ export class Runner {
         jsonFile(path.join(folder, 'agent.json'), { client: result.client, status: result.status, code: result.code, signal: result.signal,
           usage: result.usage, providerThreadId: result.providerThreadId, error: result.error, truncated: result.truncated });
         usage = result.usage; providerThreadId = result.providerThreadId;
-        if (result.status !== 'success') throw new WorkerFailure(`${this.args.client} ${result.status} (${result.code})${result.error ? `: ${result.error}` : ''}; see ${folder}/worker.jsonl`, result.status === 'timed-out' ? 'timeout' : 'worker_error',
+        if (result.status !== 'success') throw new WorkerFailure(`${this.args.client} ${result.status} (${result.code})${result.error ? `: ${result.error}` : ''}; see ${folder}/worker.jsonl`, result.status === 'timed-out' ? 'timeout'
+          : /context_window_exceeded|context_length_exceeded|maximum context length/i.test(result.error || '') ? 'context_limit' : 'worker_error',
           metrics());
         if (!fs.existsSync(resultFile)) {
           // CLI clients without output-file controls can return a bare or fenced receipt.
@@ -329,28 +349,59 @@ export class Runner {
         let taskRun = previousRuns, clarification: Clarification | undefined;
         while (true) {
           const folder = path.join(this.runDir, `${String(this.rows.length + 1).padStart(3, '0')}-${id}`);
+          let attemptFolder = folder;
           fs.mkdirSync(folder);
-          const resumeSessionId = clarification?.sessionId || this.taskSessions.get(id)?.id;
+          let resumeSessionId = clarification?.sessionId || this.taskSessions.get(id)?.id;
           const row: Record<string, any> = { task_id: id, task_path: relative, task_run: ++taskRun, task_run_limit: limit, started_at: now(), round: this.rows.length + 1, client: this.args.worker ? 'custom' : this.args.client, phase: clarification ? 'clarification' : 'execution', session_resumed: !!resumeSessionId };
           this.rows.push(row); console.log(JSON.stringify({ round: row.round, task_id: id, event: 'started', client: row.client }));
           try {
             setTaskRuns(file, row.task_run);
             await this.record(file, `Started round ${row.round}. Evidence: ${folder}`);
             const priorNotes = readTask(file).body.split('\n## Progress').slice(1).join('\n## Progress');
-            const { result, metrics } = await this.worker(file, folder, clarification, resumeSessionId); Object.assign(row, metrics);
-            if (!isDeepStrictEqual(contract(file), before) || readTask(file).meta.status !== 'in-progress' || taskRuns(file) !== row.task_run) throw new Error('Worker changed task scope, metadata or runner-owned status/counter');
-            let status = result.status;
-            if (status === 'completed' || status === 'in-review') {
-              if (checks(file)[1] || !result.evidence.length) throw new InvalidResponse('Completion requires checked criteria and verification evidence');
-              if (this.workflow === 'pr-review') {
-                if (status !== 'in-review' || !readTask(file).meta.pr?.length) throw new InvalidResponse('PR-review work requires in-review and a real linked PR');
-              } else if (status !== 'completed') throw new InvalidResponse('Solo work completes directly');
-            } else if (!result.next_step.trim()) throw new InvalidResponse('Unfinished work needs a concrete next step or blocker/owner/retry trigger');
+            const deadline = Date.now() + this.args.timeout * 1000;
+            let attemptNotes = priorNotes, result!: WorkerResult, status: WorkerResult['status'];
+            row.attempts = [];
+            for (let continuation = 0; ; continuation++) {
+              if (this.signal?.aborted) throw new Error('Worker cancelled before continuation');
+              const output = await this.worker(file, attemptFolder, clarification, resumeSessionId, deadline, continuation);
+              result = output.result;
+              const remaining = Math.max(0, (deadline - Date.now()) / 1000);
+              const reason = result.status === 'pending' ? pendingReason(result, remaining, this.args.timeout) : result.status;
+              const attempt = { ...output.metrics, result, reason, remaining_seconds: remaining, session_resumed: !!resumeSessionId, folder: attemptFolder };
+              row.attempts.push(attempt);
+              jsonFile(path.join(attemptFolder, 'attempt.json'), attempt);
+              Object.assign(row, output.metrics, { elapsed_seconds: Math.round((this.args.timeout - remaining) * 100) / 100 });
+              if (!isDeepStrictEqual(contract(file), before) || readTask(file).meta.status !== 'in-progress' || taskRuns(file) !== row.task_run) throw new Error('Worker changed task scope, metadata or runner-owned status/counter');
+              status = result.status;
+              if (status === 'completed' || status === 'in-review') {
+                if (checks(file)[1] || !result.evidence.length) throw new InvalidResponse('Completion requires checked criteria and verification evidence');
+                if (this.workflow === 'pr-review') {
+                  if (status !== 'in-review' || !readTask(file).meta.pr?.length) throw new InvalidResponse('PR-review work requires in-review and a real linked PR');
+                } else if (status !== 'completed') throw new InvalidResponse('Solo work completes directly');
+              } else if (!result.next_step.trim()) throw new InvalidResponse('Unfinished work needs a concrete next step or blocker/owner/retry trigger');
+              const journal = readTask(file).body.split('\n## Progress').slice(1).join('\n## Progress');
+              const newNotes = journal.startsWith(attemptNotes) ? journal.slice(attemptNotes.length) : journal;
+              try { row.documentation_check = documentationEvidence(result, newNotes); }
+              catch (error) { throw new InvalidResponse(error instanceof Error ? error.message : String(error)); }
+              row.pending_reason = reason;
+              if (status !== 'pending' || reason === 'deadline' || clarification || continuation >= 2) break;
+              await this.record(file, `Checkpoint within task run ${row.task_run}: ${result.summary}\nEvidence: ${result.evidence.join('; ')}\nNext: ${result.next_step}\nContinuation reason: ${reason}. Original deadline: ${new Date(deadline).toISOString()}.`);
+              if ((deadline - Date.now()) / 1000 <= handoffReserve(this.args.timeout) + Math.min(5, this.args.timeout / 100)) {
+                row.pending_reason = 'deadline'; break;
+              }
+              resumeSessionId = reason === 'early_pending' && this.args.client === 'codex' && !this.args.worker
+                ? output.metrics.provider_thread_id || undefined : undefined;
+              // A fresh thread really sheds context; resuming the same history does not.
+              this.taskSessions.delete(id);
+              attemptNotes = readTask(file).body.split('\n## Progress').slice(1).join('\n## Progress');
+              attemptFolder = path.join(folder, `continuation-${continuation + 1}`);
+              fs.mkdirSync(attemptFolder);
+              console.log(JSON.stringify({ event: 'task_continuation', task_id: id, task_run: row.task_run, continuation: continuation + 1, reason, remaining_seconds: remaining, resumed: !!resumeSessionId }));
+            }
             const noProgress = status === 'pending' && (verifiedCount(file) <= verifiedBefore || !result.evidence.length);
+            Object.assign(row, attemptTotals(row.attempts));
             const journal = readTask(file).body.split('\n## Progress').slice(1).join('\n## Progress');
             const notes = journal.startsWith(priorNotes) ? journal.slice(priorNotes.length) : journal;
-            try { row.documentation_check = documentationEvidence(result, notes); }
-            catch (error) { throw new InvalidResponse(error instanceof Error ? error.message : String(error)); }
             if (status === 'pending' && row.task_run >= limit) {
               status = 'blocked'; row.blocked_reason = 'task_run_limit'; row.review_request = limitMessage(row.task_run);
             } else if (noProgress) row.recovery_reason = 'no_progress';
@@ -359,7 +410,7 @@ export class Runner {
             await this.status(id, status); await this.cli('validate');
             Object.assign(row, { status, ended_at: now(), checked_before: count[0], checked_after: checks(file)[0], verified_before: verifiedBefore, verified_after: verifiedCount(file), result });
             if (!await this.publishRound(row, folder, file, before)) return await this.finish(this.lockError ? 'lock_lost' : this.signal?.aborted ? 'interrupted' : 'git_sync_error', this.lockError ? 1 : this.signal?.aborted ? 130 : 1);
-            if (status === 'pending' && this.args.client === 'codex' && !this.args.worker && row.provider_thread_id)
+            if (status === 'pending' && row.pending_reason !== 'reported_context_limit' && this.args.client === 'codex' && !this.args.worker && row.provider_thread_id)
               this.taskSessions.set(id, { id: row.provider_thread_id, contract: before });
             else this.taskSessions.delete(id);
             if (status === 'blocked') await this.reportBlocked(row, folder);
@@ -368,7 +419,17 @@ export class Runner {
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             if (error instanceof InvalidResponse || error instanceof WorkerFailure) Object.assign(row, error.metrics);
-            try { if (fs.existsSync(file)) fs.copyFileSync(file, path.join(folder, 'rejected-task.md')); }
+            if (row.attempts) {
+              let attempt = row.attempts.at(-1);
+              if (attempt?.folder !== attemptFolder) {
+                attempt = { folder: attemptFolder, ...(error instanceof InvalidResponse || error instanceof WorkerFailure ? error.metrics : {}) };
+                row.attempts.push(attempt);
+              }
+              attempt.error = message;
+              jsonFile(path.join(attemptFolder, 'attempt.json'), attempt);
+              Object.assign(row, attemptTotals(row.attempts));
+            }
+            try { if (fs.existsSync(file)) fs.copyFileSync(file, path.join(attemptFolder, 'rejected-task.md')); }
             catch (e) { row.archival_error = String(e); }
             let intact = false;
             try { intact = isDeepStrictEqual(contract(file), before) && readTask(file).meta.status === 'in-progress' && taskRuns(file) === row.task_run; } catch {}
@@ -377,7 +438,7 @@ export class Runner {
               await this.record(file, `Worker attempt interrupted: ${message}. Changes are retained and are not assumed verified. Continue from the current files and retained evidence: ${folder}.`, true);
               await this.status(id, 'pending'); await this.cli('validate');
               if (!await this.publishRound(row, folder, file, before)) return await this.finish(this.lockError ? 'lock_lost' : this.signal?.aborted ? 'interrupted' : 'git_sync_error', this.lockError ? 1 : this.signal?.aborted ? 130 : 1);
-              if (this.args.client === 'codex' && !this.args.worker && row.provider_thread_id)
+              if (error.kind !== 'context_limit' && this.args.client === 'codex' && !this.args.worker && row.provider_thread_id)
                 this.taskSessions.set(id, { id: row.provider_thread_id, contract: before });
               else this.taskSessions.delete(id);
               console.log(JSON.stringify({ event: 'task_retry', task_id: id, round: row.round, reason: error.kind, next_action: 'retry_task' }));
@@ -386,7 +447,7 @@ export class Runner {
             if (error instanceof InvalidResponse && intact && !row.archival_error && !clarification && !this.signal?.aborted && !this.lockError && row.task_run < limit && (!this.args.rounds || this.rows.length < this.args.rounds)) {
               Object.assign(row, { status: 'invalid_response', error: message, ended_at: now(), next_action: 'clarify_response' });
               jsonFile(path.join(folder, 'receipt.json'), row);
-              clarification = { folder, error: message, ...(this.args.client === 'codex' && !this.args.worker && (row.provider_thread_id || resumeSessionId) ? { sessionId: row.provider_thread_id || resumeSessionId } : {}) };
+              clarification = { folder: attemptFolder, error: message, ...(this.args.client === 'codex' && !this.args.worker && (row.provider_thread_id || resumeSessionId) ? { sessionId: row.provider_thread_id || resumeSessionId } : {}) };
               console.log(JSON.stringify({ event: 'response_clarification', task_id: id, round: row.round, reason: message, resumed: !!clarification.sessionId, next_action: 'clarify_response' }));
               continue;
             }

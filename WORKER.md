@@ -1,10 +1,17 @@
-Implement only the selected task below, within its acceptance criteria. Follow the
+Read the selected task from the supplied Task file path (also TASKMD_TASK_FILE).
+Implement it within its acceptance criteria. Follow the
 workspace and owning repository AGENTS.md. Read linked context only when needed
 for this task; use retained evidence before discovering the same code again.
 When Progress names the next edit and passing selector, begin there. Inspect
 additional history only for a concrete missing input; a new round is not a new audit.
-Read the selected task's dependencies, context and acceptance before editing.
+Before editing, read its frontmatter, objective, scope, acceptance and latest
+Progress from disk. Locate headings and read bounded ranges; reach older Progress
+only for a concrete missing input. On continuation, refresh the current task
+contract and latest handoff, then continue from the retained next edit.
 Use taskmd context with finite file limits only when a linked input is needed.
+Locate symbols or headings first, then read the smallest relevant range. Save
+large command output to an evidence file and return only status and the relevant
+excerpt. Reuse unchanged receipts; expand reads for a specific missing input.
 Run taskmd from the supplied Project directory with its explicit configuration
 and task directory; preserve the owning checkout when worktree overlays exist.
 
@@ -17,13 +24,18 @@ Work through the selected task's full acceptance within the supplied worker
 budget. Record verified slices as checkpoints, then continue with the next
 required implementation or affected check in this session. Task sizing estimates
 guide planning; finishing one file, path or test case does not end execution.
+Checkpoints are Progress updates within this run. Continue from each checkpoint
+while authorized acceptance can advance. Use the client's supported automatic
+compaction and a concise checkpoint to manage growing history. The runner imposes
+no context-token budget; token counts and precautionary context concerns alone
+are not stopping conditions. Resuming the same thread preserves its history.
 Reserve the supplied handoff time before the deadline for a durable checkpoint.
 When the runner requests a deadline handoff, stop starting new work, finish or
 safely stop the current operation, and return a checkpoint promptly. Check the
 supplied handoff-request file before each new operation. Record unfinished and
 unverified work honestly, with the exact next edit; a timeout is resumable work.
 
-Before implementation in every round, compare the ticket's objective, scope and
+Before implementation, compare the ticket's objective, scope and
 acceptance with existing canonical specifications and applicable product/API
 documentation. Start with linked context; search the owning documentation only
 for missing authority. Check public/private boundaries and permission decisions;
@@ -35,8 +47,10 @@ comparison and disposition. For missing documentation, name the searched locatio
 and gap. For an authorized change, reconcile affected documentation within scope.
 Block before implementation when an unresolved conflict affects scope, authority,
 publication or acceptance; identify the decision owner and unblock condition.
-Reuse a prior check only after confirming its ticket scope and documents are unchanged;
-record that confirmation as this round's Documentation check. The runner requires
+For a continuation, confirm unchanged scope and documentation with a concise
+reference to the retained check, then start at the next edit. Reopen only changed
+or missing authority. Record that confirmation as this dispatch's Documentation
+check. The runner requires
 matching outcomes in new Progress notes and result evidence before accepting a round.
 
 The runner owns task status and dependencies. Preserve frontmatter, objective,
@@ -58,9 +72,11 @@ provider tests, record live fixtures or use subscription proxies for tests.
 
 Report `completed` only after every checklist and acceptance criterion passes;
 include exact check results or source-bound retained receipts in `evidence`.
-Report `pending` when the time or context limit requires a handoff. Preserve
-verified progress and identify checks that have not run. Record the specific limit, retained evidence and exact next
-edit in Progress and `next_step`. Report `blocked` with the missing input, its owner and retry
+Report `pending` at the supplied deadline or when an observed provider limit
+prevents further work after supported context recovery. Record the actual signal
+or error and attempted recovery, retained evidence, unrun checks and exact next
+edit in Progress and `next_step`. An early pending return may be continued inside
+this run's remaining budget. Report `blocked` with the missing input, its owner and retry
 trigger when no selected criterion can advance. Under PR-review, completed work
 requires an actual PR and reports `in-review`; completion waits for merge.
 Adding the real PR URL to the task's `pr` field is the sole metadata exception.

@@ -27,7 +27,9 @@ const perform = mode => {
       ? { type: 'agentMessage', text: e.item.text } : { type: 'commandExecution', aggregatedOutput: e.item.aggregated_output } });
     if (e.type === 'turn.completed') {
       const u = e.usage;
-      notify('thread/tokenUsage/updated', { tokenUsage: { last: { inputTokens: u.input_tokens, outputTokens: u.output_tokens, cachedInputTokens: 0 } } });
+      const pressure = mode === 'context-once';
+      if (pressure) notify('thread/tokenUsage/updated', { tokenUsage: { modelContextWindow: 475000, last: { inputTokens: 449769, outputTokens: 2, cachedInputTokens: 0 } } });
+      notify('thread/tokenUsage/updated', { tokenUsage: { modelContextWindow: 475000, last: { inputTokens: pressure ? 169838 : u.input_tokens, outputTokens: u.output_tokens, cachedInputTokens: 0 } } });
       finished = true;
       notify('turn/completed', { turn: { id: turnId, status: failure ? 'failed' : 'completed', error: failure ? { message: failure } : null } });
     }

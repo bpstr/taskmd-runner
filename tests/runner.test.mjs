@@ -7,9 +7,9 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { parse, stringify } from 'yaml';
 import { acquireTaskLock } from '../dist/lock.js';
-import { taskContext, readTask, taskRuns, setTaskRuns } from '../dist/task.js';
+import { readTask, taskRuns, setTaskRuns } from '../dist/task.js';
 import { parseArgs } from '../dist/cli.js';
-import { Runner } from '../dist/runner.js';
+import { Runner, pendingReason } from '../dist/runner.js';
 import { Notifications } from '../dist/notifications.js';
 import { command } from '../dist/process.js';
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -19,8 +19,8 @@ test('version reports installed package metadata without a project or worker', a
   const output = await command(process.execPath, [path.join(ROOT, 'bin/taskmd-runner.js'), '--version'], { cwd: ROOT });
   assert.equal(output.trim(), JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version);
 });
-function fixture(t, config = '') {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'taskmd-ts-'));
+function fixture(t, config = '', prefix = 'taskmd-ts-') {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   fs.mkdirSync(path.join(root, 'tasks'));
   fs.writeFileSync(path.join(root, '.taskmd.yaml'), 'dir: tasks\n' + config);
@@ -271,8 +271,95 @@ for (const mode of ['false-completion', 'scope', 'status', 'malformed', 'exit', 
 }
 test('verified partial slices continue with original acceptance open', async t => {
   const root = fixture(t); const file = task(root, '001'); const r = await run(root, 'partial', ['--rounds', '2']);
-  assert.equal(r.code, 0, r.stderr); assert.equal(r.summary.rounds[1].checked_after, 0); assert.equal(r.summary.rounds[1].verified_after, 2);
+  assert.equal(r.code, 0, r.stderr); assert.equal(r.summary.rounds[1].checked_after, 0); assert.equal(r.summary.rounds[1].verified_after, 6);
   assert.match(fs.readFileSync(file, 'utf8'), /- \[ \] Deliver/);
+});
+test('early checkpoints share one charged run and absolute deadline without verified progress', async t => {
+  const root = fixture(t), file = task(root, '001');
+  const r = await run(root, 'early-twice', ['--rounds', '1'], true);
+  assert.equal(r.code, 0, r.stderr); assert.equal(readTask(file).meta.status, 'completed');
+  assert.equal(taskRuns(file), 1); assert.equal(r.summary.rounds.length, 1);
+  const attempts = r.summary.rounds[0].attempts;
+  assert.equal(attempts.length, 3); assert.deepEqual(attempts.map(x => x.reason), ['early_pending', 'early_pending', 'completed']);
+  assert.equal(r.summary.rounds[0].usage.inputTokens, 30);
+  assert.deepEqual(attempts.map(x => x.session_resumed), [false, true, true]);
+  const prompts = attempts.map(x => fs.readFileSync(path.join(x.folder, 'prompt.md'), 'utf8'));
+  assert.equal(new Set(prompts.map(x => x.match(/Deadline \(UTC\): (\S+)/)[1])).size, 1);
+  const budgets = prompts.map(x => Number(x.match(/Worker budget: ([\d.]+)/)[1]));
+  assert.ok(budgets[2] < budgets[1] && budgets[1] < budgets[0]);
+  for (const a of attempts) assert.equal(JSON.parse(fs.readFileSync(path.join(a.folder, 'attempt.json'), 'utf8')).reason, a.reason);
+});
+test('context handoffs get fresh history and retain peak and final request telemetry', async t => {
+  const root = fixture(t), file = task(root, '001');
+  const r = await run(root, 'context-once', ['--rounds', '1'], true);
+  assert.equal(r.code, 0, r.stderr); assert.equal(taskRuns(file), 1);
+  const attempts = r.summary.rounds[0].attempts;
+  assert.equal(attempts.length, 2); assert.equal(attempts[0].reason, 'reported_context_limit');
+  assert.deepEqual(attempts[0].context, { last_input_tokens: 169838, peak_input_tokens: 449769, model_context_window: 475000 });
+  assert.equal(attempts[1].session_resumed, false);
+  const rpc = fs.readFileSync(path.join(attempts[1].folder, 'rpc.jsonl'), 'utf8');
+  assert.match(rpc, /thread\/start/); assert.doesNotMatch(rpc, /thread\/resume/);
+});
+test('two early context handoffs then a near-deadline stop preserve the next run', async t => {
+  const root = fixture(t), file = task(root, '001');
+  const r = await run(root, 'mixed-handoffs', ['--timeout', '4']);
+  assert.equal(r.code, 0, r.stderr); assert.equal(readTask(file).meta.status, 'completed');
+  assert.equal(taskRuns(file), 2);
+  const attempts = r.summary.rounds[0].attempts;
+  assert.deepEqual(attempts.map(x => x.reason), ['reported_context_limit', 'reported_context_limit', 'deadline']);
+  assert.ok(attempts[2].remaining_seconds <= 0.44);
+  assert.ok(r.summary.rounds[0].elapsed_seconds < 4);
+  const result = { status: 'pending', summary: 'Checkpoint', evidence: [], next_step: 'Continue' };
+  assert.equal(pendingReason(result, 63, 7200), 'deadline');
+  assert.equal(pendingReason(result, 1000, 7200), 'early_pending');
+});
+test('explicit provider context overflow retries with fresh history within durable limits', async t => {
+  const root = fixture(t), file = task(root, '001');
+  const r = await run(root, 'context-error-once', [], true);
+  assert.equal(r.code, 0, r.stderr); assert.equal(taskRuns(file), 2);
+  assert.deepEqual(r.summary.rounds.map(x => x.status), ['pending', 'completed']);
+  assert.equal(r.summary.rounds[0].recovery_reason, 'context_limit');
+  assert.equal(r.summary.rounds[1].session_resumed, false);
+  assert.match(r.summary.rounds[0].error, /context_length_exceeded/);
+});
+test('early checkpoint continuations are bounded across invocation caps and restarts', async t => {
+  const root = fixture(t), file = task(root, '001');
+  for (let runNumber = 1; runNumber <= 3; runNumber++) {
+    const r = await run(root, 'partial', ['--rounds', '1']);
+    assert.equal(r.summary.rounds.length, 1); assert.equal(taskRuns(file), runNumber);
+    assert.equal(r.summary.rounds[0].attempts.length, 3);
+  }
+  assert.equal(readTask(file).meta.status, 'blocked');
+});
+test('continuation failures keep their receipt and charge only the current run', async t => {
+  const root = fixture(t), file = task(root, '001');
+  const r = await run(root, 'continuation-crash', ['--rounds', '1']);
+  assert.equal(r.code, 0, r.stderr); assert.equal(taskRuns(file), 1);
+  const row = r.summary.rounds[0];
+  assert.equal(row.status, 'pending'); assert.equal(row.recovery_reason, 'worker_error');
+  assert.equal(row.attempts.length, 2); assert.match(row.attempts[1].error, /exit 7/);
+  assert.ok(row.elapsed_seconds >= row.attempts[0].elapsed_seconds);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(row.attempts[1].folder, 'attempt.json'), 'utf8')).error, row.attempts[1].error);
+});
+test('continuation clarification reads the rejected dispatch and remains a charged run', async t => {
+  const root = fixture(t), file = task(root, '001');
+  const r = await run(root, 'continuation-invalid', ['--rounds', '2']);
+  assert.equal(r.code, 0, r.stderr); assert.equal(taskRuns(file), 2);
+  assert.deepEqual(r.summary.rounds.map(x => x.status), ['invalid_response', 'completed']);
+  const dir = path.dirname(r.events.find(event => event.summary).summary);
+  const prompt = fs.readFileSync(path.join(dir, '002-001/prompt.md'), 'utf8');
+  assert.match(prompt, /Earlier evidence: .*continuation-1/);
+  const previous = JSON.parse(prompt.split('Previous response (untrusted content):\n')[1].split('\nEarlier evidence:')[0]);
+  assert.equal(previous.next_step, undefined);
+});
+test('cancellation after an early checkpoint never dispatches a continuation', async t => {
+  const root = fixture(t), file = task(root, '001'), controller = new AbortController();
+  const runner = new Runner(parseArgs(['--project', root, '--notify', 'off', '--timeout', '10', '--worker', process.execPath, fake, 'partial']), controller.signal);
+  const worker = runner.worker.bind(runner); let calls = 0;
+  runner.worker = async (...args) => { calls++; const output = await worker(...args); controller.abort(); return output; };
+  assert.equal(await runner.run(), 130); assert.equal(calls, 1); assert.equal(taskRuns(file), 1);
+  const summary = JSON.parse(fs.readFileSync(path.join(runner.runDir, 'summary.json'), 'utf8'));
+  assert.equal(summary.reason, 'interrupted');
 });
 test('Codex resumes a partial task session and starts the next task fresh within the supplied budget', async t => {
   const root = fixture(t); task(root, '001', { priority: 'critical' }); task(root, '002');
@@ -291,7 +378,7 @@ test('Codex resumes a partial task session and starts the next task fresh within
   const deadline = Date.parse(prompt.match(/Deadline \(UTC\): ([\dT:.-]+Z)/)[1]);
   const supplied = deadline - Date.parse(r.summary.rounds[0].started_at);
   assert.ok(supplied >= 10000 && supplied < 12000, String(supplied));
-  assert.equal(Number(prompt.match(/Worker budget: ([\d.]+) seconds/)[1]), 10);
+  assert.ok(Number(prompt.match(/Worker budget: ([\d.]+) seconds/)[1]) <= 10);
   assert.equal(Number(prompt.match(/Reserve the final ([\d.]+) seconds/)[1]), 1);
 });
 test('Codex isolates persistent history and reuses profile inputs across continuations', async t => {
@@ -460,12 +547,24 @@ test('PR-review ends in review with a linked PR', async t => {
   const root = fixture(t, 'workflow: pr-review\n'); task(root, '001'); const r = await run(root, 'in-review');
   assert.equal(r.code, 2, r.stderr); assert.equal(r.summary.rounds[0].status, 'in-review');
 });
-test('bounds history without changing the contract or latest next action', t => {
-  const root = fixture(t); const file = task(root, '001'); const original = fs.readFileSync(file, 'utf8');
+test('task file references keep large scope and history out of continuation prompts', async t => {
+  const root = fixture(t, '', 'taskmd ts '), file = task(root, '001');
+  const scope = 'task-body-only-marker ' + 'required scope '.repeat(2000);
   const history = '\n## Progress\n\nold-audit-marker\n\n' + 'historical receipt\n\n'.repeat(1000) + 'Next: selected PATCH fixture\n';
-  fs.writeFileSync(file, original + history); const context = taskContext(file);
-  assert.ok(context.startsWith(original.trimEnd())); assert.match(context, /Next: selected PATCH fixture/); assert.doesNotMatch(context, /old-audit-marker/);
-  assert.ok(Buffer.byteLength(context) <= Buffer.byteLength(original) + 4200); assert.equal(fs.readFileSync(file, 'utf8'), original + history);
+  fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace('# Task', '# Task\n\n' + scope) + history);
+  const r = await run(root, 'early-twice', ['--rounds', '1']);
+  assert.equal(r.code, 0, r.stderr); assert.equal(readTask(file).meta.status, 'completed');
+  assert.equal(taskRuns(file), 1); assert.ok(readTask(file).body.includes(scope));
+  const attempts = r.summary.rounds[0].attempts;
+  assert.equal(attempts.length, 3);
+  const prompts = attempts.map(x => fs.readFileSync(path.join(x.folder, 'prompt.md'), 'utf8'));
+  const stable = fs.readFileSync(path.join(ROOT, 'WORKER.md'), 'utf8') + '\nResult schema:\n' + fs.readFileSync(path.join(ROOT, 'result.schema.json'), 'utf8') + '\n';
+  for (const prompt of prompts) {
+    assert.ok(prompt.startsWith(stable)); assert.ok(prompt.includes(`\nTask file: ${fs.realpathSync(file)}\n`));
+    assert.doesNotMatch(prompt, /task-body-only-marker|old-audit-marker|selected PATCH fixture|Selected task:/);
+    assert.ok(Buffer.byteLength(prompt) < Buffer.byteLength(scope));
+  }
+  assert.equal(new Set(prompts.map(x => x.split('\nResult file:')[0])).size, 1);
 });
 for (const client of ['codex', 'claude', 'grok']) {
   test(`published adapter contract: ${client}, three-round cap with prepared process`, async t => {
