@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import type { Writable } from 'node:stream';
+import { withoutMonitorCredentials } from './monitor-state.js';
 
 export interface CommandOptions {
   cwd: string; env?: NodeJS.ProcessEnv; input?: string; signal?: AbortSignal;
@@ -9,7 +10,7 @@ export interface CommandOptions {
 export function command(executable: string, args: string[], options: CommandOptions): Promise<string> {
   return new Promise((resolve, reject) => {
     if (options.signal?.aborted) { reject(new Error('Interrupted')); return; }
-    const child = spawn(executable, args, { cwd: options.cwd, env: options.env, detached: process.platform !== 'win32', stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(executable, args, { cwd: options.cwd, env: withoutMonitorCredentials(options.env), detached: process.platform !== 'win32', stdio: ['pipe', 'pipe', 'pipe'] });
     child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
     let stdout = '', stderr = '', failure: Error | undefined, escalation: NodeJS.Timeout | undefined;
     const kill = (signal: NodeJS.Signals) => {

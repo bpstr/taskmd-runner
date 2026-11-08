@@ -5,6 +5,7 @@ import path from 'node:path';
 import { parse, stringify } from 'yaml';
 if (process.argv.includes('app-server')) { await import('./fake-codex-server.mjs'); process.exit(); }
 let mode = process.env.PREPARED_MODE || process.argv[2] || 'completed';
+if (process.env.PREPARED_REQUIRE_NO_MONITOR_KEY && (process.env.TASKMD_MONITOR_API_KEY || process.env.ROADMAP_MONITOR_API_KEY)) throw new Error('Monitor credential leaked into prepared worker');
 let prompt = '';
 if (process.argv.some(arg => arg.startsWith('--single='))) prompt = process.argv.find(arg => arg.startsWith('--single=')).slice(9);
 else for await (const chunk of process.stdin) prompt += chunk;

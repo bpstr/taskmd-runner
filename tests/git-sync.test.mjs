@@ -8,6 +8,7 @@ import { GitSync } from '../dist/git.js';
 import { acquireTaskLock, taskLease } from '../dist/lock.js';
 import { readTask, setTaskRuns, taskRuns } from '../dist/task.js';
 import { parseArgs } from '../dist/cli.js';
+process.env.TASKMD_MONITOR = 'off';
 const ROOT = path.resolve(import.meta.dirname, '..');
 const WORKER = path.join(ROOT, 'tests/git-worker.mjs');
 fs.chmodSync(WORKER, 0o755);
@@ -47,7 +48,7 @@ async function run(root, options = [], env = {}, adapter) {
   const args = [path.join(ROOT, 'bin/taskmd-runner.js'), '--project', root, '--notify', 'off', '--timeout', '10', '--git-sync', ...options];
   if (adapter) args.push('--client', adapter, '--executable', WORKER);
   else args.push('--worker', process.execPath, WORKER);
-  const child = spawn(process.execPath, args, { env: { ...process.env, ...env } });
+  const child = spawn(process.execPath, args, { env: { ...process.env, TASKMD_MONITOR: 'off', ...env } });
   let stdout = '', stderr = ''; child.stdout.on('data', x => stdout += x); child.stderr.on('data', x => stderr += x);
   const code = await new Promise((resolve, reject) => { child.once('close', resolve); child.once('error', reject); });
   const event = stdout.trim().split('\n').filter(Boolean).map(x => JSON.parse(x)).find(x => x.summary);

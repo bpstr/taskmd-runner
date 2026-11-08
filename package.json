@@ -1,6 +1,6 @@
 {
   "name": "@bpstr/taskmd-runner",
-  "version": "0.3.3",
+  "version": "0.4.0",
   "description": "Sequential taskmd execution through coding-agent CLI clients",
   "type": "module",
   "bin": {
@@ -17,7 +17,8 @@
     "GIT_WORKER.md",
     "result.schema.json",
     "README.md",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "THIRD_PARTY_NOTICES"
   ],
   "scripts": {
     "build": "tsc",

@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { parse, stringify } from 'yaml';
 import { acquireTaskLock } from '../dist/lock.js';
@@ -12,6 +13,7 @@ import { parseArgs } from '../dist/cli.js';
 import { Runner, pendingReason } from '../dist/runner.js';
 import { Notifications } from '../dist/notifications.js';
 import { command } from '../dist/process.js';
+process.env.TASKMD_MONITOR = 'off';
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const fake = path.join(ROOT, 'tests/fake-worker.mjs');
 const limitReview = /Review required: the task owner must review this task or split it into subtasks that collectively preserve the original scope and acceptance criteria/;
@@ -37,7 +39,7 @@ async function run(root, mode = 'completed', options = [], adapter = false, env 
   const args = [path.join(ROOT, 'bin/taskmd-runner.js'), '--project', root, '--notify', 'off', '--timeout', '10', ...options];
   if (adapter) args.push('--executable', fake);
   else args.push('--worker', process.execPath, fake, mode);
-  const child = spawn(process.execPath, args, { env: { ...process.env, CODEX_HOME: path.join(root, 'prepared-profile'), PREPARED_MODE: mode, ...env } });
+  const child = spawn(process.execPath, args, { env: { ...process.env, TASKMD_MONITOR: 'off', TASKMD_MONITOR_STATE_DIR: path.join(root, 'monitor-state'), CODEX_HOME: path.join(root, 'prepared-profile'), PREPARED_MODE: mode, ...env } });
   let stdout = '', stderr = '';
   child.stdout.on('data', chunk => stdout += chunk); child.stderr.on('data', chunk => stderr += chunk);
   const code = await new Promise((resolve, reject) => { child.once('error', reject); child.once('close', resolve); });
@@ -45,6 +47,74 @@ async function run(root, mode = 'completed', options = [], adapter = false, env 
   const final = events.find(event => event.summary);
   return { code, stderr, events, summary: final && JSON.parse(fs.readFileSync(final.summary, 'utf8')) };
 }
+for (const scenario of [
+  { name: 'drained queue', mode: 'completed', options: [], outcome: 'completed', code: 0 },
+  { name: 'round cap', mode: 'completed', options: ['--rounds', '1'], outcome: 'needs_attention', code: 0 },
+  { name: 'blocked task followed by independent work', mode: 'blocked-first', options: [], outcome: 'needs_attention', code: 2 },
+]) test(`monitor reports ${scenario.name} through prepared workers`, async t => {
+  const root = fixture(t); task(root, '001', { priority: 'critical' }); task(root, '002');
+  const reports = [], key = `rm_${'a'.repeat(16)}_${'b'.repeat(64)}`;
+  const server = createServer(async (req, res) => {
+    let body = ''; for await (const chunk of req) body += chunk;
+    assert.equal(req.headers.authorization, `Bearer ${key}`);
+    reports.push(JSON.parse(body));
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ installation_id: '00000000-0000-4000-8000-000000000001', protocol_versions: [1] }));
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const r = await run(root, scenario.mode, scenario.options, scenario.name === 'drained queue', { PREPARED_REQUIRE_NO_MONITOR_KEY: '1', TASKMD_MONITOR: 'on', TASKMD_MONITOR_URL: `http://127.0.0.1:${server.address().port}/ingest`, TASKMD_MONITOR_API_KEY: key });
+  assert.equal(r.code, scenario.code, r.stderr);
+  const envelopes = reports.filter(report => report.kind !== 'probe'), final = envelopes.at(-1);
+  assert.equal(final.run.terminal, true); assert.equal(final.run.heartbeat_expected, false);
+  assert.equal(final.run.terminal_outcome, scenario.outcome);
+  assert.match(envelopes[0].run.roadmap_label, /^Taskmd · /);
+  assert.equal(final.last_update?.outcome, 'completed');
+  assert.ok(final.run.last_progress_at);
+  assert.ok(envelopes.some(report => report.activity?.text.includes('Task 001')));
+  assert.ok(envelopes.flatMap(report => report.events).some(event => event.type === 'runner.task_result'));
+  assert.ok(!JSON.stringify(envelopes).includes(root)); assert.ok(!JSON.stringify(envelopes).includes(key));
+  if (scenario.mode === 'blocked-first') {
+    assert.deepEqual(r.summary.rounds.map(row => row.task_id), ['001', '002']);
+    assert.equal(final.attention[0].task_id, '001');
+  }
+  if (process.env.MONITOR_REPORT_CAPTURE) fs.writeFileSync(path.join(process.env.MONITOR_REPORT_CAPTURE, scenario.mode + (scenario.options.length ? '-cap' : '') + '.json'), JSON.stringify(envelopes));
+});
+test('offline monitor delivery retains terminal replay while prepared work succeeds', async t => {
+  const root = fixture(t); task(root, '001');
+  const r = await run(root, 'completed', [], false, { TASKMD_MONITOR: 'on', TASKMD_MONITOR_URL: 'http://127.0.0.1:1/ingest', TASKMD_MONITOR_API_KEY: `rm_${'a'.repeat(16)}_${'b'.repeat(64)}` });
+  assert.equal(r.code, 0, r.stderr); assert.equal(r.summary.reason, 'empty');
+  const outbox = path.join(root, 'monitor-state/monitor/outbox');
+  const partition = path.join(outbox, fs.readdirSync(outbox)[0]);
+  const files = fs.readdirSync(partition);
+  assert.equal(files.length, 1); assert.ok(files[0].endsWith('.json'));
+  assert.equal(JSON.parse(fs.readFileSync(path.join(partition, files[0]))).terminal.run.terminal_outcome, 'completed');
+});
+test('monitor finalizes prepared cancellation without a live heartbeat', async t => {
+  const root = fixture(t); task(root, '001');
+  const reports = [];
+  let started;
+  const running = new Promise(resolve => { started = resolve; });
+  const server = createServer(async (req, res) => {
+    let body = ''; for await (const chunk of req) body += chunk;
+    const report = JSON.parse(body); reports.push(report);
+    res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ installation_id: '00000000-0000-4000-8000-000000000001', protocol_versions: [1] }));
+    if (report.run?.task_id) started();
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const child = spawn(process.execPath, [path.join(ROOT, 'bin/taskmd-runner.js'), '--project', root, '--notify', 'off', '--worker', process.execPath, fake, 'timeout'], {
+    env: { ...process.env, TASKMD_MONITOR_STATE_DIR: path.join(root, 'monitor-state'), TASKMD_MONITOR: 'on', TASKMD_MONITOR_URL: `http://127.0.0.1:${server.address().port}/ingest`, TASKMD_MONITOR_API_KEY: `rm_${'a'.repeat(16)}_${'b'.repeat(64)}`, PREPARED_MODE: 'timeout' }, stdio: 'ignore',
+  });
+  t.after(() => { if (child.exitCode === null) child.kill('SIGTERM'); });
+  const exit = new Promise((resolve, reject) => { child.once('close', resolve); child.once('error', reject); });
+  await running;
+  child.kill('SIGINT');
+  assert.equal(await exit, 130);
+  const final = reports.at(-1);
+  assert.equal(final.run.terminal_outcome, 'cancelled'); assert.equal(final.run.heartbeat_expected, false);
+  if (process.env.MONITOR_REPORT_CAPTURE) fs.writeFileSync(path.join(process.env.MONITOR_REPORT_CAPTURE, 'interrupted.json'), JSON.stringify(reports.filter(report => report.kind !== 'probe')));
+});
 test('five-round cap preserves strict priority and dependencies', async t => {
   const root = fixture(t); task(root, '001', { priority: 'low' }); task(root, '002', { priority: 'critical', dependencies: ['001'] });
   for (const id of ['003', '004', '005', '006']) task(root, id, { priority: 'high' });
@@ -605,7 +675,7 @@ test('notifications deduplicate successful submissions and retain failed evidenc
 for (const adapter of [false, true]) test(`SIGTERM reaps ${adapter ? 'Codex' : 'custom'} worker and releases the lock without retrying`, async t => {
   const root = fixture(t); const file = task(root, '001');
   const child = spawn(process.execPath, [path.join(ROOT, 'bin/taskmd-runner.js'), '--project', root, '--notify', 'off',
-    ...(adapter ? ['--executable', fake] : ['--worker', process.execPath, fake, 'timeout'])], { env: { ...process.env, PREPARED_MODE: 'timeout' } });
+    ...(adapter ? ['--executable', fake] : ['--worker', process.execPath, fake, 'timeout'])], { env: { ...process.env, TASKMD_MONITOR: 'off', PREPARED_MODE: 'timeout' } });
   let stdout = '', stderr = '';
   child.stdout.on('data', chunk => stdout += chunk); child.stderr.on('data', chunk => stderr += chunk);
   const closed = new Promise(resolve => child.once('close', resolve));

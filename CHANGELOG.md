@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.0
+
+- Report taskmd invocations to Roadmap Monitor using its existing v1 protocol.
+  Add private connection setup, status/probe controls, heartbeats, task activity,
+  validated results, blocker attention and durable historical replay.
+- Preserve task execution during reporting failures. Exclude monitor credentials
+  from taskmd, Git and coding-worker subprocess environments.
+- Distinguish a completed queue from a successful round-cap exit in the dashboard.
+
+
 ## 0.3.3 — 2026-11-07
 
 - Reference task files instead of embedding their contents in each worker prompt;

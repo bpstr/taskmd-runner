@@ -2,6 +2,7 @@ import { CLIENT_NAMES, type ClientName } from '@bpstr/agent-adapter';
 import { readFileSync } from 'node:fs';
 import { Runner, type Options } from './runner.js';
 import { notificationEvents, requestNotificationPermission, type NotificationEvent } from './notifications.js';
+import { monitorCommand } from './monitor-cli.js';
 
 const help = `Usage: taskmd-runner --project PATH [options]
 
@@ -33,6 +34,8 @@ Select pending taskmd work, claim it, run one worker, validate and repeat.
                         ${notificationEvents.join(', ')}
   --worker COMMAND ...  Custom worker argv; must be last
   notifications request-permission   macOS notification setup
+  monitor configure --url URL [--api-key-stdin] [--label NAME]
+  monitor test|status|enable|disable|flush [--json]   Roadmap Monitor reporting
 `;
 export function parseArgs(argv: string[]): Options {
   const options: Options = { project: '', taskmd: 'taskmd', filter: [], rounds: 0, maxTaskRuns: 5, blockAfterRuns: 3, timeout: 7200, client: 'codex', sandbox: 'workspace-write', permissions: 'default', notify: 'attention', notifyOn: [], gitSync: false, gitRepo: [], gitConflicts: 'stop' };
@@ -86,6 +89,7 @@ export async function main(argv: string[]): Promise<number> {
   const controller = new AbortController(); const stop = () => controller.abort();
   process.on('SIGINT', stop); process.on('SIGTERM', stop);
   try {
+    if (argv[0] === 'monitor') { await monitorCommand(argv.slice(1)); return 0; }
     if (argv[0] === 'notifications') {
       if (argv.length !== 2 || argv[1] !== 'request-permission') throw new Error('Use notifications request-permission');
       return await requestNotificationPermission(controller.signal);

@@ -12,6 +12,8 @@ import { Notifications, type NotificationOptions } from './notifications.js';
 import { GitSync, type GitConflict } from './git.js';
 import { acquireTaskLock, taskLease, taskRegistryLease } from './lock.js';
 import { isolatedCodexHome } from './codex.js';
+import { attachMonitor, flushMonitor, type MonitorReporter } from './monitor.js';
+import { withoutMonitorCredentials } from './monitor-state.js';
 
 const HERE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export interface Options extends NotificationOptions {
@@ -81,6 +83,11 @@ export class Runner {
   gitSync?: GitSync;
   private lockError?: string;
   private configText: string;
+  private monitor?: MonitorReporter | null;
+  private monitorSequence = 0;
+  private monitorEvent(type: string, data: Record<string, unknown> = {}) {
+    this.monitor?.event({ id: randomUUID(), sequence: ++this.monitorSequence, at: now(), type, ...data });
+  }
   constructor(public args: Options, private signal?: AbortSignal) {
     this.root = fs.realpathSync(path.resolve(args.project));
     this.config = args.config ? path.resolve(args.config) : path.join(this.root, '.taskmd.yaml');
@@ -144,6 +151,11 @@ export class Runner {
       ...(row.review_request ? { review_request: row.review_request } : {}),
       ...(row.error ? { error: row.error } : {}), ...(folder ? { receipt: path.join(folder, 'receipt.json') } : {}) };
     this.blockedTasks.push(blocked);
+    if (this.monitor) {
+      this.monitor.record.attentionTasks = this.blockedTasks.map(task => task.task_id);
+      this.monitor.record.attentionReasons = Object.fromEntries(this.blockedTasks.map(task => [task.task_id, task.reason]));
+      this.monitorEvent('runner.blocked', { task: row.task_id, reasonCode: blocked.reason });
+    }
     console.log(JSON.stringify({ event: 'task_blocked', ...blocked, next_action: 'select_next_task' }));
     await this.notifications.send('runner.blocked', this.root, row.task_id);
   }
@@ -181,6 +193,12 @@ export class Runner {
   async finish(reason: string, code: number): Promise<number> {
     jsonFile(path.join(this.runDir, 'summary.json'), { reason, exit_code: code, client: this.args.client, rounds: this.rows, blocked_tasks: this.blockedTasks, skipped_tasks: [...this.unavailableTasks].map(([task_id, reason]) => ({ task_id, reason })), ...(this.gitSync ? { git_sync: this.gitSync.state() } : {}), ...(this.lockError ? { lock_error: this.lockError } : {}), ended_at: now() });
     console.log(JSON.stringify({ reason, rounds: this.rows.length, summary: path.join(this.runDir, 'summary.json') }));
+    if (this.monitor) {
+      Object.assign(this.monitor.record, { reason, exitCode: code, endedAt: now(), processState: 'exited',
+        roadmapState: reason === 'empty' ? 'complete' : reason === 'no_ready_tasks' ? 'blocked' : 'stopped' });
+      this.monitorEvent('runner.stopped', { reasonCode: reason });
+      await this.monitor.finish().catch(() => {});
+    }
     await this.notifications.sendForReason(reason, this.root, this.rows.at(-1)?.task_id);
     return code;
   }
@@ -208,11 +226,18 @@ export class Runner {
     if (output.result.status !== 'completed' || !output.result.evidence.length) throw new Error(`Git conflict worker did not complete a verified resolution; inspect ${conflict.folder}`);
   }
   private async invokeWorker(prompt: string, folder: string, cwd: string, extraEnv: NodeJS.ProcessEnv, resumeSessionId?: string, deadline = Date.now() + this.args.timeout * 1000) {
+    if (this.monitor) {
+      this.monitor.record.deadline = new Date(deadline).toISOString();
+      if (extraEnv.TASKMD_WORKER_ROLE === 'git-conflict') {
+        this.monitor.record.role = 'resolver';
+        this.monitorEvent('runner.turn_starting', { role: 'resolver' });
+      }
+    }
     const resultFile = path.join(folder, 'result.json');
     fs.writeFileSync(path.join(folder, 'prompt.md'), prompt);
     const handoffAt = deadline - handoffReserve(this.args.timeout) * 1000;
     const handoffMessage = 'The worker deadline is approaching. Stop starting new work. Finish or safely stop the current operation, save changed files, and record a durable Progress checkpoint with actual verification, remaining acceptance and the exact next edit. Return the required JSON now: pending for unfinished work, completed only if all acceptance is verified, or blocked for a concrete external prerequisite. Preserve scope and report unverified work honestly.';
-    const env = { ...process.env, ...extraEnv, TASKMD_RESULT_FILE: resultFile, TASKMD_ROUND_DIR: folder, ASSIGN_OFFLINE_TESTS: '1',
+    const env = { ...withoutMonitorCredentials(), ...extraEnv, TASKMD_RESULT_FILE: resultFile, TASKMD_ROUND_DIR: folder, ASSIGN_OFFLINE_TESTS: '1',
       TASKMD_HANDOFF_AT: String(handoffAt), TASKMD_HANDOFF_MESSAGE: handoffMessage };
     const log = fs.createWriteStream(path.join(folder, 'worker.jsonl'));
     const started = performance.now(); let usage: Usage | Record<string, number> | null = null;
@@ -279,6 +304,10 @@ export class Runner {
     try {
       release = await acquireTaskLock(this.tasks, error => { this.lockError = error.message; lease.abort(); }, this.args.gitSync ? [] : this.taskPrefixes);
       fs.mkdirSync(this.runDir, { recursive: true });
+      this.monitor = attachMonitor({ id: randomUUID().replaceAll('-', '').slice(0, 24), roadmap: this.root,
+        createdAt: now(), readyAt: now(), processState: 'running', roadmapState: 'in_progress', pid: process.pid });
+      this.monitorEvent('runner.started');
+      if (this.monitor) void flushMonitor(1).catch(() => {});
       // Check adapter controls before claiming any task.
       if (!this.args.worker) buildRunnerInvocation({ client: this.args.client, prompt: 'preflight', workdir: this.root, model: this.args.model, effort: this.args.effort, permissions: this.args.permissions });
       if (this.args.gitSync) {
@@ -354,6 +383,10 @@ export class Runner {
           let resumeSessionId = clarification?.sessionId || this.taskSessions.get(id)?.id;
           const row: Record<string, any> = { task_id: id, task_path: relative, task_run: ++taskRun, task_run_limit: limit, started_at: now(), round: this.rows.length + 1, client: this.args.worker ? 'custom' : this.args.client, phase: clarification ? 'clarification' : 'execution', session_resumed: !!resumeSessionId };
           this.rows.push(row); console.log(JSON.stringify({ round: row.round, task_id: id, event: 'started', client: row.client }));
+          if (this.monitor) {
+            Object.assign(this.monitor.record, { role: 'worker', task: id, iteration: row.round, roadmapState: 'in_progress' });
+            this.monitorEvent('runner.turn_starting', { task: id, role: 'worker', activityTitle: meta.title });
+          }
           try {
             setTaskRuns(file, row.task_run);
             await this.record(file, `Started round ${row.round}. Evidence: ${folder}`);
@@ -410,6 +443,8 @@ export class Runner {
             await this.status(id, status); await this.cli('validate');
             Object.assign(row, { status, ended_at: now(), checked_before: count[0], checked_after: checks(file)[0], verified_before: verifiedBefore, verified_after: verifiedCount(file), result });
             if (!await this.publishRound(row, folder, file, before)) return await this.finish(this.lockError ? 'lock_lost' : this.signal?.aborted ? 'interrupted' : 'git_sync_error', this.lockError ? 1 : this.signal?.aborted ? 130 : 1);
+            if (this.monitor) { this.monitor.state.sessionId = row.provider_thread_id ?? null; this.monitor.record.role = 'worker'; }
+            this.monitorEvent('runner.task_result', { task: id, sessionId: row.provider_thread_id ?? null, operation: result.summary, outcome: status, nextRecordedStep: result.next_step, resultObservedAt: row.ended_at, progressVerified: status === 'completed' || status === 'in-review' || row.verified_after > row.verified_before || row.checked_after > row.checked_before });
             if (status === 'pending' && row.pending_reason !== 'reported_context_limit' && this.args.client === 'codex' && !this.args.worker && row.provider_thread_id)
               this.taskSessions.set(id, { id: row.provider_thread_id, contract: before });
             else this.taskSessions.delete(id);
@@ -483,6 +518,12 @@ export class Runner {
         }
       }
       return await this.finish('round_limit', 0);
+    } catch (error) {
+      if (this.monitor && !this.monitor.closed) {
+        Object.assign(this.monitor.record, { reason: this.lockError ? 'lock_lost' : this.signal?.aborted ? 'interrupted' : 'runner_error', exitCode: this.lockError ? 1 : this.signal?.aborted ? 130 : 1, endedAt: now(), processState: 'exited', roadmapState: 'stopped' });
+        await this.monitor.finish().catch(() => {});
+      }
+      throw error;
     } finally {
       originalSignal?.removeEventListener('abort', stop);
       if (release) { try { await release(); } catch (error) { if (!this.lockError) throw error; } }

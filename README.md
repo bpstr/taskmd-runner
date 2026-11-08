@@ -190,6 +190,50 @@ prefixes and all `--git-sync` runs remain exclusive. Task scopes coordinate task
 claims; coordinate shared source files, other tools and worktrees through their
 existing owners. A taskmd failure is an error, never an empty queue.
 
+## Roadmap Monitor reporting
+
+Report runs to the private [Roadmap Monitor](https://bpstr-roadmap-monitor.netlify.app)
+dashboard. Under Connections, create a connection for this machine, select
+Taskmd Runner and enter its write key at the masked prompt:
+
+```sh
+taskmd-runner monitor configure --url https://spauznhnjhsycddvxzuk.supabase.co/functions/v1/monitor-ingest
+taskmd-runner monitor test --json
+taskmd-runner monitor status --json
+```
+
+For another deployment, use the ingestion URL shown in Connections. Automation
+can pipe the key to `monitor configure --url URL --api-key-stdin`. Keys are never
+command arguments. Setup and probes create no dashboard run or model call.
+
+Configured invocations report automatically, including custom workers. The
+dashboard shows `Taskmd · PROJECT`, task IDs/titles, rounds, validated summaries,
+blockers and terminal outcomes. An empty finished queue is completed; a round cap
+requires attention even when the CLI exits successfully. Blocked tasks remain
+visible while independent work continues. Interruptions are cancelled; unexpected
+runner failures are failed. Existing runs need restarting to adopt reporting.
+
+`monitor disable` / `monitor enable` preserve the connection and its identity.
+`TASKMD_MONITOR=off` disables reporting for one invocation. Environment overrides
+`TASKMD_MONITOR_URL` and `TASKMD_MONITOR_API_KEY` respect a saved disabled setting.
+Monitor keys are removed from taskmd, Git and coding-worker environments.
+
+Private configuration and replay state live under
+`~/Library/Application Support/taskmd-runner/monitor` on macOS and
+`${XDG_STATE_HOME:-~/.local/state}/taskmd-runner/monitor` on Linux. The optional
+`TASKMD_MONITOR_STATE_DIR` changes the parent directory; `--state-dir` continues
+to control local task evidence. Credential files use mode 0600 in 0700 directories.
+Task bodies, prompts, evidence paths and raw worker output are not uploaded.
+Task titles and validated summaries are bounded and redact common secrets and
+private paths; keep sensitive content out of these fields.
+
+Monitoring failures never block task execution. Live reporting uses a roughly
+60-second heartbeat, one request in flight and bounded backoff. Failed terminal
+reports and sparse events remain on disk; `monitor flush` retries up to 32 stored
+streams for the selected connection as historical reports. A configured invocation
+can retry one stored stream using an already verified connection. Saved settings
+and retained reports survive package updates.
+
 ## Git synchronization
 
 Opt in for a repository with a configured tracking branch:

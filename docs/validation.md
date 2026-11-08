@@ -1,5 +1,52 @@
 # Runner validation
 
+## Roadmap Monitor reporting
+
+Scope: optional user-level monitor configuration and protocol-v1 publishing from
+native taskmd lifecycle events. Completion requires prepared drain/cap/blocker
+flows to produce monitor-compatible terminal reports, network failure to leave
+work successful with a durable replay, credential isolation, safe configuration
+replacement and bounded single-publisher delivery. Reuse existing task selection,
+contract, counter, continuation, lock and adapter evidence where unchanged.
+
+Selected checks: build; `tests/monitor.test.mjs`; the runner selectors beginning
+`monitor reports` and `offline monitor`; existing drain, cap, blocker, interruption,
+custom worker/adapter, Git and CLI controls affected by child environment changes.
+Expected cost under 30 seconds. Capture reports under
+`.taskmd-runner/monitor-integration/` and validate them with roadmap-monitor's
+actual v1 parser. No paid inference, live workers or full application suite.
+Monitor frontend has a runner command selector only; use build and existing
+presentation/protocol checks, then its required production release workflow.
+
+Results: 25 distinct prepared checks passed (7 monitor unit/CLI, 5 reporting
+lifecycle, 11 existing runner/version and 2 Git workflow checks), with zero
+failures or skips. Reused passing configuration/privacy evidence after changing
+only finalization; the final lifecycle rerun covers retained terminal summaries,
+verified-progress timestamps and worker credential isolation. All 30 captured
+reports passed the monitor's actual v1 parser. No live worker or model call.
+
+Version 0.4.0 was packed and installed globally offline. All 51 installed files
+match the archive, including the copied transport's MIT notice. Archive SHA-256:
+`5f1cf83157e4ad30fc291bc47c70a6bf744832ac13d21477f5c70677c8827ae2`.
+Installed version/help passed. Reused this machine's existing verified Roadmap
+Monitor connection without rotating credentials or changing its identity; saved
+taskmd configuration and the installed CLI's real connection-only probe passed.
+Probes created no dashboard stream. This is a local installation; npm publication
+was not performed.
+
+Monitor 0.1.5 deployed through production workflow
+`42523754529` at commit `6ecb8fdcb1180617b38f0686000a917887570dda`.
+Its full release gates passed. No new backend/schema contract was needed.
+Installed-phone notification delivery and real model execution are not qualified
+by these prepared checks.
+
+Resource check: prepared workers and temporary HTTP listeners exited. No browser
+or persistent preview was started. Existing MCP browser controllers and the
+Assign Vite service were retained. Session evidence is under 1 MiB, the installed
+package is 2 MiB and data-volume free space is 20 GiB. No unrelated caches,
+credentials, source or retained qualification artifacts were removed.
+
+
 ## 0.3.3 GitHub release
 
 Release scope: issue #2 continuation/context recovery and task-file prompt
