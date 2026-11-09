@@ -1,5 +1,137 @@
 # Runner validation
 
+## 0.4.0 GitHub release
+
+Release scope: Roadmap Monitor reporting, runner MCP and local lane integration.
+Reuse the prepared feature results in the sections below, including the existing
+monitor parser receipts. Release checks cover the assembled archive, matching
+package metadata and an offline installation with version/help and an MCP
+initialize/tools-list exchange. `npm pack` runs the TypeScript build through
+`prepack`. These checks cover the release artifact and its new runtime dependency
+loading. No full suite, paid inference or live worker launch. Expected cost under
+30 seconds. Retain artifacts and logs under `.taskmd-runner/release-0.4.0/`.
+
+Results: the build and offline installation passed. Package and lockfile versions
+match. All 57 archived files matched the checkout and the offline installation.
+The installed CLI reported `0.4.0`, exposed local integration in help, and served
+the four expected MCP tools. The installed MCP accepted an empty registry query
+and advertised `git_integration_branch`. Roadmap Monitor's actual v1 parser
+accepted a prepared pause report. Whitespace validation passed. The archive is
+92,619 bytes with SHA-256
+`c4399caab9470164a5e1d6bb8f2f8342c82cad57e145a5be5f8a0a251a134494`.
+
+The archive, per-file manifest and logs remain in the release evidence directory.
+Removed the disposable `installed/` verification copy from that directory,
+reclaiming approximately 18.4 MiB. Data-volume free space remains 20 GiB.
+No release-owned runner, worker, browser or preview remained. Existing browser
+and development resources were retained.
+
+## Local lane integration before task runs
+
+Plan (2026-11-08 follow-up): the requester clarified that lanes merge a shared
+local integration branch into their checkout before new task runs, with optional
+additional upstream Git sync. Add `--git-integration-branch` /
+`git_integration_branch` independently of `--git-sync`. Local mode commits accepted
+handoffs, merges `refs/heads/<branch>` at each task boundary, and never fetches or
+pushes. Upstream mode retains its configured tracking branch for fetch/push and
+also merges the explicitly selected local integration branch. Linked worktrees
+share local branch refs; independent clones must keep that branch current.
+Keep exclusive per-checkout Git leases and existing conflict preservation/resolver
+rules. After a pause during selection, refresh Git and reselect before claiming.
+
+Acceptance: build; prepared local worktree two-task run proving main advances
+between workers and is merged before the next worker, with no remote configured;
+local missing-branch/conflict stop before claim; combined upstream/local merges;
+CLI and MCP option forwarding; existing Git boundary, publication, conflict-worker
+and pause/resume selectors. No live providers or full suite: reuse unaffected MCP,
+monitor, cancellation and task-budget evidence above. Expected under 15 seconds.
+Logs: `.taskmd-runner/mcp-control/integration-*.log`.
+Sources: [Git merge](https://git-scm.com/docs/git-merge),
+[Git reference validation](https://git-scm.com/docs/git-check-ref-format).
+
+Results: build and whitespace checks passed. Five local integration/CLI selectors
+passed (5.6 seconds): a two-task scoped linked worktree with no remote, missing
+branch, conflicting local branch, combined local/upstream sources and CLI option
+contracts. Eight affected existing Git selectors passed (11.2 seconds), including
+upstream boundaries, clean-state guards, conflict preservation/resolution,
+publication rejection/race, configuration restart and multi-checkout preflight.
+The MCP detached-start/pause/stop selector passed (1.4 seconds), including actual
+forwarding of local integration without upstream sync. Retain all other passing
+MCP, monitoring, cancellation and budget evidence from the previous checkpoint.
+No provider calls or full-suite run.
+
+The Git fixture launcher initially used the user registry. Isolated subsequent
+fixtures in their own temporary control directory and verified cleanup with only
+the affected local worktree selector (passed, 2.5 seconds). Archived the seven
+confirmed terminal records from this follow-up under
+`.taskmd-runner/mcp-control/integration-control-records/` (3,316 bytes), retaining
+evidence and removing prepared runs from user discovery. Other registry records
+were preserved. No runner/worker processes remained. No browsers or previews were
+started; existing shared services were retained. Data-volume free space remains
+20 GiB; touched build output is 244 KiB and verification evidence about 232 KiB.
+No unrelated disk cleanup or dependency change was needed.
+
+## Local runner MCP control
+
+Plan (2026-11-08): add MCP stdio discovery/start/status/control, authenticated
+per-invocation loopback controllers, workspace/lane identities, boundary pause,
+existing cancellation/reconciliation for stop, and self-scoped Codex worker MCP.
+Preserve task-store/prefix locks and existing monitoring/receipts. No central
+daemon or inference-based status summaries. Use the official MCP TypeScript
+server SDK 2.4.0 (Apache-2.0; Node 20 compatible) and Zod 4.6.7. The initial
+Zod 4.2.0 install reported an oversized-collection vulnerability; update to 4.6.7
+before verification. npm audit then reported zero vulnerabilities.
+
+Selected acceptance: build; new local controller/MCP tests covering protocol
+discovery/calls, exact run identity, multiple workspaces/lanes, duplicate-lane
+rejection, authentication, stale endpoints, revision responses, self scope,
+detached start, prepared boundary pause/resume and cancellation/reconciliation.
+Affected retained-workflow checks: Codex isolated/shared session launch, prepared
+monitor reporting, prefix concurrency, cancellation and lock ownership; monitor
+projection for pause. Use prepared workers only. Read the current superseding
+paid-inference policy; no live provider calls, credential loading or fixture
+recording. Expected cost: under two minutes. Reuse unrelated selection, task
+budget, Git synchronization and notification evidence already recorded here;
+no full-suite gate or suite-wide impact. Completion requires passing selected
+acceptance, documented setup/limits and cleanup of session-owned controllers.
+Retain logs under `.taskmd-runner/mcp-control/`.
+
+Sources: [MCP stdio serving](https://ts.sdk.modelcontextprotocol.io/v2/serving/stdio),
+[Codex MCP stdio settings](https://learn.chatgpt.com/docs/extend/mcp#stdio-servers).
+
+Results: build, wrapper syntax and whitespace checks passed. Five new prepared
+controller/protocol/integration checks passed (1.8 seconds), covering isolation,
+authentication, stale endpoints, worker self scope, revision responses, a detached
+run surviving its MCP client, boundary pause/resume, duplicate-lane rejection and
+stop reconciliation. Eleven affected retained-workflow selectors passed (4.8
+seconds): monitor outcomes/cancellation, isolated/shared Codex history, task lease
+ownership, custom/Codex SIGTERM cleanup, CLI controls and scoped/Git lock rules.
+Added assertions that isolated Codex launches include the scoped MCP and forward
+only environment-variable names in its config; reran only that affected selector
+(passed, 0.9 seconds). An active-only default for discovery invalidated discovery
+and protocol acceptance; its three selected checks passed separately. Reuse the
+other passing checks. The local Codex CLI accepted the generated worker MCP TOML
+override without starting a provider. Installed the source-checkout stdio command
+as the global `taskmd_runner` connection; no existing credentials were changed.
+
+Initial failed evidence is retained in `control-first.log` (fixture cleanup ran
+before status lookup) and `control-detached-second.log` (asserted pending on
+cancellation; the existing runner intentionally blocks interrupted workers).
+Fixed fixture cleanup order and the assertion; preserve cancellation behavior.
+No paid inference, live provider-quality or measured token-savings claim.
+
+Session dependency sizes: MCP packages 8.3 MiB, Zod 8.1 MiB, compiled output
+244 KiB; local verification evidence approximately 176 KiB including process and
+listener snapshots. Data-volume free space
+was 20 GiB, already below the 50-GiB inspection threshold. Inspected the touched
+directories; retained active dependencies/build output and qualification evidence.
+No artifact paths were removed or unrelated cleanup attempted.
+Final ownership check found no runner or prepared-worker processes remaining.
+Existing Codex-owned browser MCP processes and Assign Vite/Astro services were
+retained; this session started no browser or preview server. Final dependency
+audit: zero vulnerabilities. Global MCP inspection confirms the enabled stdio
+connection points to this checkout and the absolute local Node executable.
+
 ## Roadmap Monitor reporting
 
 Scope: optional user-level monitor configuration and protocol-v1 publishing from

@@ -24,7 +24,7 @@ const version = JSON.parse(
 ).version;
 const MAX_BYTES = 1024 * 1024;
 const meaningful = new Set([
-  "runner.started", "runner.turn_starting", "runner.task_result", "runner.blocked", "runner.stopped", "runner.progress_updated",
+  "runner.started", "runner.turn_starting", "runner.task_result", "runner.blocked", "runner.stopped", "runner.progress_updated", "runner.paused", "runner.resumed",
 ]);
 export const monitorText = (value: unknown) =>
   sanitize(String(value ?? ""))
@@ -88,7 +88,9 @@ export function projectMonitor(
   };
   let text: string;
   let source = "lifecycle";
-  if (record.waitReason === "quota") {
+  if (record.waitReason === "paused") {
+    text = "Paused";
+  } else if (record.waitReason === "quota") {
     text = "Waiting for quota reset";
     source = "quota_wait";
   } else if (role === "resolver") {

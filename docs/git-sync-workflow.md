@@ -4,6 +4,16 @@ Investigation: 2026-11-05. Scope: separate task subtrees assigned to different
 machines, with a shared Git history for task progress and source changes.
 This is a proposed design, not an implemented feature or release qualification.
 
+Local lane update (2026-11-08): `--git-integration-branch main` now merges the
+local `refs/heads/main` into a lane before each task boundary and commits accepted
+handoffs locally. Linked worktrees share that integration ref; each lane owns a
+separate checkout. Optional `--git-sync` additionally synchronizes the lane's
+configured remote tracking branch. The runner preserves the lane branch and
+its configured push target. Missing local branches or conflicts
+stop before claiming work; conflict workers remain an explicit option. This does
+not implement the proposed cross-machine claim publication or dependency polling
+below. Prepared evidence is recorded in `docs/validation.md`.
+
 ## Recommendation
 
 Extend the existing `--git-sync` controller. Run each machine in its own dedicated

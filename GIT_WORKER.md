@@ -6,7 +6,8 @@ product or authority decision is required. Name the owner and retry condition.
 Edit only the supplied conflict paths, including deletions when the
 accepted resolution requires them. Preserve the branch, HEAD, MERGE_HEAD and
 every other path and the Git index. The controller stages the resolved paths,
-verifies the merge, commits and pushes. Leave the merge in progress with
+verifies and commits the merge, and pushes only with upstream synchronization.
+Leave the merge in progress with
 resolved working files and no conflict markers.
 Fetching, committing, pushing, aborting/resetting the merge, changing branches,
 stashing and selecting task work are outside this worker's scope.

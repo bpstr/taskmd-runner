@@ -15,6 +15,13 @@ excerpt. Reuse unchanged receipts; expand reads for a specific missing input.
 Run taskmd from the supplied Project directory with its explicit configuration
 and task directory; preserve the owning checkout when worktree overlays exist.
 
+When runner_status and runner_control MCP tools are available, they target this
+run only. Use them for compact status and authorized pause/resume/stop requests.
+Pause waits until this task round finishes; return the normal result and handoff
+without waiting for the runner to become paused. Stop cancels this worker and
+reconciles the task. For clients without automatic MCP setup, the same stdio
+server is available as `taskmd-runner mcp --self` in the worker environment.
+
 Implement the ticket as written. Existing behavior, implementation difficulty and
 documentation checks do not authorize changing its intended outcome or weakening
 acceptance. Report conflicts or missing decisions as blockers instead of reframing

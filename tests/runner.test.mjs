@@ -471,6 +471,10 @@ test('Codex isolates persistent history and reuses profile inputs across continu
     const argv = JSON.parse(fs.readFileSync(path.join(dir, round, 'server-argv.json')));
     assert.ok(argv.includes(`sqlite_home=${JSON.stringify(home)}`));
     assert.ok(argv.includes(`log_dir=${JSON.stringify(path.join(home, 'log'))}`));
+    const mcp = argv.find(arg => arg.startsWith('mcp_servers.taskmd_runner='));
+    assert.ok(mcp?.includes('"mcp","--self"'), 'Codex receives the self-scoped runner MCP');
+    assert.ok(mcp.includes('env_vars=["TASKMD_RUNNER_SELF_ID","TASKMD_RUNNER_SELF_ENDPOINT","TASKMD_RUNNER_SELF_TOKEN"]'));
+    assert.doesNotMatch(mcp, /http:\/\/127\.0\.0\.1|Bearer/);
   }
   for (const name of [...Object.keys(inputs), 'skills', 'rules', 'plugins'])
     assert.equal(fs.realpathSync(path.join(home, name)), fs.realpathSync(path.join(profile, name)));

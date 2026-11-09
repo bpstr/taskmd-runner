@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { createOutputParser } from '@bpstr/agent-adapter';
 const args = process.argv.slice(2);
 let prompt = '';
@@ -12,8 +13,10 @@ const effortConfig = args.find(arg => arg.startsWith('model_reasoning_effort='))
 const effort = effortConfig ? JSON.parse(effortConfig.slice(effortConfig.indexOf('=') + 1)) : undefined;
 const resume = value('resume');
 const isolatedHome = process.env.TASKMD_CODEX_ISOLATED_HOME;
+const runnerMcp = process.env.TASKMD_RUNNER_SELF_ID ? ['-c', `mcp_servers.taskmd_runner={command=${JSON.stringify(process.execPath)},args=[${JSON.stringify(fileURLToPath(new URL('./taskmd-runner.js', import.meta.url)))},"mcp","--self"],env_vars=["TASKMD_RUNNER_SELF_ID","TASKMD_RUNNER_SELF_ENDPOINT","TASKMD_RUNNER_SELF_TOKEN"]}`] : [];
 const child = spawn(process.env.TASKMD_CODEX_EXECUTABLE || 'codex',
   ['app-server', '--listen', 'stdio://', '-c', 'approval_policy="never"',
+    ...runnerMcp,
     ...(isolatedHome ? ['-c', `sqlite_home=${JSON.stringify(isolatedHome)}`, '-c', `log_dir=${JSON.stringify(path.join(isolatedHome, 'log'))}`] : [])],
   { stdio: ['pipe', 'pipe', 'inherit'] });
 const emit = event => process.stdout.write(JSON.stringify(event) + '\n');

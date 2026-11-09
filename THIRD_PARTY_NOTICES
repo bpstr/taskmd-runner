@@ -1,3 +1,7 @@
+Local MCP control uses @modelcontextprotocol/server and @modelcontextprotocol/core
+under Apache-2.0, and Zod under MIT. These npm dependencies retain their licenses
+in their installed packages. https://github.com/modelcontextprotocol/typescript-sdk
+
 Monitoring configuration and delivery adapted from @bpstr/roadmap-runner.
 
 MIT License

@@ -3,12 +3,15 @@ import { readFileSync } from 'node:fs';
 import { Runner, type Options } from './runner.js';
 import { notificationEvents, requestNotificationPermission, type NotificationEvent } from './notifications.js';
 import { monitorCommand } from './monitor-cli.js';
+import { laneName } from './control.js';
 
 const help = `Usage: taskmd-runner --project PATH [options]
 
 Select pending taskmd work, claim it, run one worker, validate and repeat.
 
   --version              Print the installed package version
+  --lane NAME            Workspace lane identity (default main, or task-prefix scope)
+  mcp [--self]           Serve local runner control over MCP stdio
   --client NAME          ${CLIENT_NAMES.join(', ')} (default codex)
   --rounds N             Maximum worker rounds; 0 drains ready work (default 0)
   --max-task-runs N      Maximum runs per task across restarts (default 5)
@@ -27,6 +30,7 @@ Select pending taskmd work, claim it, run one worker, validate and repeat.
   --task-dir PATH        Task directory override
   --state-dir PATH       Evidence directory override
   --git-sync             Fetch/merge before tasks; commit/push valid rounds
+  --git-integration-branch NAME  Merge a local branch before each task; commit handoffs
   --git-repo PATH        Repeatable repository path (default project checkout)
   --git-conflicts MODE   stop (default) or worker for a dedicated resolver
   --notify POLICY       attention (default) or off
@@ -42,6 +46,7 @@ export function parseArgs(argv: string[]): Options {
   const strings: Record<string, keyof Options> = { '--project': 'project', '--config': 'config', '--task-dir': 'taskDir', '--state-dir': 'stateDir', '--taskmd': 'taskmd', '--model': 'model', '--effort': 'effort', '--client': 'client', '--sandbox': 'sandbox', '--executable': 'executable', '--permissions': 'permissions', '--notify': 'notify' };
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
+    if (flag === '--lane') { options.lane = laneName(argv[++i]); if (argv[i] === undefined) throw new Error('Missing value for --lane'); continue; }
     if (flag === '--worker') { options.worker = argv.slice(i + 1); if (!options.worker.length) throw new Error('--worker must be nonempty'); break; }
     if (flag === '--git-sync') { options.gitSync = true; continue; }
     const value = argv[++i];
@@ -57,6 +62,7 @@ export function parseArgs(argv: string[]): Options {
     else if (flag === '--notify-on') options.notifyOn.push(...value.split(',') as NotificationEvent[]);
     else if (flag === '--git-repo') options.gitRepo.push(value);
     else if (flag === '--git-conflicts') options.gitConflicts = value as Options['gitConflicts'];
+    else if (flag === '--git-integration-branch') { if (!value.trim()) throw new Error('Integration branch must be nonempty'); options.gitIntegrationBranch = value; }
     else throw new Error(`Unknown option: ${flag}`);
   }
   if (!options.project) throw new Error('--project is required');
@@ -70,7 +76,7 @@ export function parseArgs(argv: string[]): Options {
   if (options.codexSessionPolicy !== undefined && !['isolated', 'shared'].includes(options.codexSessionPolicy)) throw new Error('Invalid Codex session policy');
   if (!['attention', 'off'].includes(options.notify)) throw new Error('Invalid notification policy');
   if (!['stop', 'worker'].includes(options.gitConflicts)) throw new Error('Invalid Git conflict policy');
-  if (!options.gitSync && (options.gitRepo.length || options.gitConflicts === 'worker')) throw new Error('--git-repo and --git-conflicts worker require --git-sync');
+  if (!options.gitSync && !options.gitIntegrationBranch && (options.gitRepo.length || options.gitConflicts === 'worker')) throw new Error('--git-repo and --git-conflicts worker require --git-sync or --git-integration-branch');
   if (options.notifyOn.some(event => !notificationEvents.includes(event))) throw new Error('Unknown notification event');
   if (options.client === 'codex') {
     options.model ??= 'gpt-6.1-sol';
@@ -79,6 +85,11 @@ export function parseArgs(argv: string[]): Options {
   return options;
 }
 export async function main(argv: string[]): Promise<number> {
+  if (argv[0] === 'mcp') {
+    if (argv.length > 2 || (argv[1] !== undefined && argv[1] !== '--self')) throw new Error('Use mcp [--self]');
+    const { serveMcp } = await import('./mcp.js');
+    await serveMcp(argv[1] === '--self'); return 0;
+  }
   const workerAt = argv.indexOf('--worker');
   const runnerArgs = workerAt < 0 ? argv : argv.slice(0, workerAt);
   if (runnerArgs.includes('--help') || runnerArgs.includes('-h')) { console.log(help); return 0; }

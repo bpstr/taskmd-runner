@@ -44,13 +44,15 @@ function tasks(root, count = 1) {
     fs.writeFileSync(path.join(root, 'tasks', `${id}-task.md`), `---\nid: '${id}'\ntitle: Task ${id}\nstatus: pending\npriority: medium\n---\n# Task\n\n- [ ] Deliver the fixture\n`);
   }
 }
-async function run(root, options = [], env = {}, adapter) {
-  const args = [path.join(ROOT, 'bin/taskmd-runner.js'), '--project', root, '--notify', 'off', '--timeout', '10', '--git-sync', ...options];
+async function run(root, options = [], env = {}, adapter, upstream = true) {
+  const control = fs.mkdtempSync(path.join(os.tmpdir(), 'taskmd-git-control-'));
+  const args = [path.join(ROOT, 'bin/taskmd-runner.js'), '--project', root, '--notify', 'off', '--timeout', '10', ...(upstream ? ['--git-sync'] : []), ...options];
   if (adapter) args.push('--client', adapter, '--executable', WORKER);
   else args.push('--worker', process.execPath, WORKER);
-  const child = spawn(process.execPath, args, { env: { ...process.env, TASKMD_MONITOR: 'off', ...env } });
+  const child = spawn(process.execPath, args, { env: { ...process.env, TASKMD_MONITOR: 'off', ...env, TASKMD_RUNNER_CONTROL_DIR: control } });
   let stdout = '', stderr = ''; child.stdout.on('data', x => stdout += x); child.stderr.on('data', x => stderr += x);
-  const code = await new Promise((resolve, reject) => { child.once('close', resolve); child.once('error', reject); });
+  const code = await new Promise((resolve, reject) => { child.once('close', resolve); child.once('error', reject); })
+    .finally(() => fs.rmSync(control, { recursive: true, force: true }));
   const event = stdout.trim().split('\n').filter(Boolean).map(x => JSON.parse(x)).find(x => x.summary);
   return { code, stderr, summary: event && JSON.parse(fs.readFileSync(event.summary)), directory: event && path.dirname(event.summary) };
 }
@@ -58,6 +60,62 @@ test('Git CLI options require explicit sync and preserve worker argv', () => {
   const args = parseArgs(['--project', '/tmp', '--git-sync', '--git-repo', 'core', '--git-repo', 'tasks', '--git-conflicts', 'worker', '--worker', 'fixture', '--git-sync']);
   assert.deepEqual(args.gitRepo, ['core', 'tasks']); assert.equal(args.gitConflicts, 'worker'); assert.deepEqual(args.worker, ['fixture', '--git-sync']);
   for (const flags of [['--git-repo', 'core'], ['--git-conflicts', 'worker'], ['--git-sync', '--git-conflicts', 'unknown']]) assert.throws(() => parseArgs(['--project', '/tmp', ...flags]));
+  const local = parseArgs(['--project', '/tmp', '--git-integration-branch', 'main', '--git-repo', 'core', '--git-conflicts', 'worker']);
+  assert.equal(local.gitIntegrationBranch, 'main'); assert.equal(local.gitSync, false);
+  assert.throws(() => parseArgs(['--project', '/tmp', '--git-integration-branch', '']), /nonempty/);
+});
+test('local worktree integration merges main before every task without a remote', async t => {
+  const base = temporary(t), { repo } = repository(base);
+  tasks(repo, 2); fs.mkdirSync(path.join(repo, 'tasks/api'));
+  for (const id of ['001', '002']) fs.renameSync(path.join(repo, `tasks/${id}-task.md`), path.join(repo, `tasks/api/${id}-task.md`));
+  fs.writeFileSync(path.join(repo, 'integration.txt'), 'baseline\n'); commit(repo);
+  git(repo, 'remote', 'remove', 'origin');
+  const lane = path.join(base, 'lane'); git(repo, 'worktree', 'add', '-b', 'lane/api', lane, 'main');
+  fs.writeFileSync(path.join(repo, 'integration.txt'), 'before first worker\n'); commit(repo);
+  const result = await run(lane, ['--git-integration-branch', 'main', '--task-prefix', 'api'],
+    { PREPARED_GIT_LOCAL_INTEGRATION: repo }, undefined, false);
+  assert.equal(result.code, 0, result.stderr); assert.equal(result.summary.rounds.length, 2);
+  assert.deepEqual(result.summary.rounds.map(row => row.git_sync), ['committed', 'committed']);
+  assert.equal(fs.readFileSync(path.join(result.directory, '001-001/integration-seen.txt'), 'utf8'), 'before first worker\n');
+  assert.equal(fs.readFileSync(path.join(result.directory, '002-002/integration-seen.txt'), 'utf8'), 'after first worker\n');
+  assert.equal(git(lane, 'branch', '--show-current'), 'lane/api');
+  git(lane, 'merge-base', '--is-ancestor', 'main', 'HEAD');
+  const state = result.summary.git_sync;
+  assert.equal(state.upstream_sync, false); assert.equal(state.integration_branch, 'main');
+  assert.equal(state.events.filter(event => event.event === 'checkpointed').length, 2);
+  assert.equal(state.events.some(event => event.event === 'pushed'), false);
+  assert.ok(state.events.some(event => event.event === 'merge' && event.target === 'refs/heads/main' && event.phase === 'integration before round 2'));
+  assert.equal(readTask(path.join(repo, 'tasks/api/001-task.md')).meta.status, 'pending');
+});
+for (const mode of ['missing', 'conflict']) test(`local integration ${mode} stops before a task claim`, async t => {
+  const base = temporary(t), { repo } = repository(base); tasks(repo); commit(repo);
+  git(repo, 'switch', '-c', 'lane/api');
+  if (mode === 'conflict') {
+    fs.writeFileSync(path.join(repo, 'shared.txt'), 'lane\n'); commit(repo);
+    git(repo, 'switch', 'main'); fs.writeFileSync(path.join(repo, 'shared.txt'), 'integration\n'); commit(repo);
+    git(repo, 'switch', 'lane/api');
+  }
+  const result = await run(repo, ['--git-integration-branch', mode === 'missing' ? 'missing' : 'main'], {}, undefined, false);
+  assert.equal(result.code, 1, result.stderr); assert.equal(result.summary.reason, 'git_sync_error');
+  assert.equal(result.summary.rounds.length, 0);
+  assert.equal(readTask(path.join(repo, 'tasks/001-task.md')).meta.status, 'pending');
+  assert.equal(fs.existsSync(path.join(repo, '.git/MERGE_HEAD')), mode === 'conflict');
+});
+test('local integration and upstream sync merge independently and publish only the lane branch', async t => {
+  const base = temporary(t), { repo, peer, remote } = repository(base);
+  git(repo, 'switch', '-c', 'lane/api'); git(repo, 'push', '-u', 'origin', 'lane/api');
+  git(repo, 'switch', 'main'); fs.writeFileSync(path.join(repo, 'local-main.txt'), 'local integration\n'); commit(repo);
+  git(repo, 'switch', 'lane/api');
+  git(peer, 'fetch'); git(peer, 'switch', '-c', 'lane-peer', '--track', 'origin/lane/api');
+  fs.writeFileSync(path.join(peer, 'remote-lane.txt'), 'upstream lane\n'); commit(peer); git(peer, 'push', 'origin', 'HEAD:lane/api');
+  const proof = path.join(base, 'proof');
+  const controller = new GitSync(repo, [], [proof], proof, undefined, undefined, 'main', true);
+  await controller.initialize(); await controller.before(1);
+  assert.equal(fs.readFileSync(path.join(repo, 'local-main.txt'), 'utf8'), 'local integration\n');
+  assert.equal(fs.readFileSync(path.join(repo, 'remote-lane.txt'), 'utf8'), 'upstream lane\n');
+  await controller.after(1, '001', 'completed', async () => {});
+  assert.equal(git(remote, 'rev-parse', 'refs/heads/lane/api'), git(repo, 'rev-parse', 'HEAD'));
+  assert.throws(() => git(remote, 'show', 'main:local-main.txt'));
 });
 test('Node lease excludes another owner, releases, and reclaims a stale crashed lease', async t => {
   const root = temporary(t), lease = taskLease(root); const release = await acquireTaskLock(root, () => {});

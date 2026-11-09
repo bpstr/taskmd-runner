@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { finished } from 'node:stream/promises';
 import { parse } from 'yaml';
@@ -14,16 +14,18 @@ import { acquireTaskLock, taskLease, taskRegistryLease } from './lock.js';
 import { isolatedCodexHome } from './codex.js';
 import { attachMonitor, flushMonitor, type MonitorReporter } from './monitor.js';
 import { withoutMonitorCredentials } from './monitor-state.js';
+import { RunControl } from './control.js';
 
 const HERE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export interface Options extends NotificationOptions {
   project: string; config?: string; taskDir?: string; stateDir?: string; taskmd: string;
+  lane?: string;
   filter: string[]; taskPrefix?: string[]; rounds: number; timeout: number; client: ClientName; executable?: string;
   maxTaskRuns: number; blockAfterRuns: number;
   codexSessionPolicy?: 'isolated' | 'shared';
   sandbox: 'workspace-write' | 'danger-full-access'; permissions: 'default' | 'bypass';
   model?: string; effort?: string; worker?: string[];
-  gitSync: boolean; gitRepo: string[]; gitConflicts: 'stop' | 'worker';
+  gitSync: boolean; gitRepo: string[]; gitConflicts: 'stop' | 'worker'; gitIntegrationBranch?: string;
 }
 export interface WorkerResult {
   status: 'pending' | 'blocked' | 'completed' | 'in-review';
@@ -85,6 +87,16 @@ export class Runner {
   private configText: string;
   private monitor?: MonitorReporter | null;
   private monitorSequence = 0;
+  private control?: RunControl;
+  private async controlCheckpoint() {
+    if (this.control?.status.state !== 'pausing' || !this.signal) return false;
+    if (this.monitor) { this.monitor.record.processState = 'waiting'; this.monitor.record.waitReason = 'paused'; }
+    this.monitorEvent('runner.paused');
+    await this.control.checkpoint(this.signal);
+    if (this.monitor) { this.monitor.record.processState = 'running'; this.monitor.record.waitReason = undefined; }
+    if (!this.signal.aborted) this.monitorEvent('runner.resumed');
+    return true;
+  }
   private monitorEvent(type: string, data: Record<string, unknown> = {}) {
     this.monitor?.event({ id: randomUUID(), sequence: ++this.monitorSequence, at: now(), type, ...data });
   }
@@ -169,12 +181,12 @@ export class Runner {
         if (!isDeepStrictEqual(contract(file), before) || merged.meta.status !== row.status || taskRuns(file) !== row.task_run || !journal.includes(acceptedJournal) || ((row.status === 'completed' || row.status === 'in-review') && checks(file)[1])) throw new Error('Git integration changed the accepted task contract, status or handoff');
         await this.cli('validate');
       });
-      row.git_sync = 'pushed';
+      row.git_sync = this.args.gitSync ? 'pushed' : 'committed';
     } catch (error) {
       this.gitSync.failed(error); row.git_sync = 'failed'; row.git_error = this.gitSync.error;
     }
     jsonFile(path.join(folder, 'receipt.json'), row);
-    return row.git_sync === 'pushed';
+    return row.git_sync === (this.args.gitSync ? 'pushed' : 'committed');
   }
   async record(file: string, message: string, handoff = false, workerNotes = '') {
     if (!this.worklogs) { progress(file, message); return; }
@@ -200,6 +212,7 @@ export class Runner {
       await this.monitor.finish().catch(() => {});
     }
     await this.notifications.sendForReason(reason, this.root, this.rows.at(-1)?.task_id);
+    this.control?.update({ state: 'exited', reason, exit_code: code, ended_at: now(), task: null, round: this.rows.length });
     return code;
   }
   async worker(file: string, folder: string, clarification?: Clarification, resumeSessionId?: string, deadline = Date.now() + this.args.timeout * 1000, continuation = 0) {
@@ -237,7 +250,8 @@ export class Runner {
     fs.writeFileSync(path.join(folder, 'prompt.md'), prompt);
     const handoffAt = deadline - handoffReserve(this.args.timeout) * 1000;
     const handoffMessage = 'The worker deadline is approaching. Stop starting new work. Finish or safely stop the current operation, save changed files, and record a durable Progress checkpoint with actual verification, remaining acceptance and the exact next edit. Return the required JSON now: pending for unfinished work, completed only if all acceptance is verified, or blocked for a concrete external prerequisite. Preserve scope and report unverified work honestly.';
-    const env = { ...withoutMonitorCredentials(), ...extraEnv, TASKMD_RESULT_FILE: resultFile, TASKMD_ROUND_DIR: folder, ASSIGN_OFFLINE_TESTS: '1',
+    const env = { ...withoutMonitorCredentials(), ...extraEnv, ...this.control?.workerEnv(), TASKMD_RUNNER_LAUNCH_ID: undefined,
+      TASKMD_RESULT_FILE: resultFile, TASKMD_ROUND_DIR: folder, ASSIGN_OFFLINE_TESTS: '1',
       TASKMD_HANDOFF_AT: String(handoffAt), TASKMD_HANDOFF_MESSAGE: handoffMessage };
     const log = fs.createWriteStream(path.join(folder, 'worker.jsonl'));
     const started = performance.now(); let usage: Usage | Record<string, number> | null = null;
@@ -302,21 +316,31 @@ export class Runner {
     this.signal = lease.signal;
     let release: (() => Promise<void>) | undefined;
     try {
-      release = await acquireTaskLock(this.tasks, error => { this.lockError = error.message; lease.abort(); }, this.args.gitSync ? [] : this.taskPrefixes);
+      const lane = this.args.lane ?? (this.taskPrefixes.length
+        ? 'scope-' + createHash('sha256').update([...this.taskPrefixes].sort().join('\0')).digest('hex').slice(0, 12) : 'main');
+      this.control = new RunControl(this.root, lane, this.runDir, action => {
+        this.monitorEvent(`runner.${action}_requested`);
+        if (action === 'stop') lease.abort();
+      });
+      await this.control.open();
+      release = await acquireTaskLock(this.tasks, error => { this.lockError = error.message; lease.abort(); }, this.args.gitSync || this.args.gitIntegrationBranch ? [] : this.taskPrefixes);
       fs.mkdirSync(this.runDir, { recursive: true });
-      this.monitor = attachMonitor({ id: randomUUID().replaceAll('-', '').slice(0, 24), roadmap: this.root,
+      this.monitor = attachMonitor({ id: this.control.status.run_id.replaceAll('-', '').slice(0, 24), roadmap: this.root,
         createdAt: now(), readyAt: now(), processState: 'running', roadmapState: 'in_progress', pid: process.pid });
       this.monitorEvent('runner.started');
       if (this.monitor) void flushMonitor(1).catch(() => {});
       // Check adapter controls before claiming any task.
       if (!this.args.worker) buildRunnerInvocation({ client: this.args.client, prompt: 'preflight', workdir: this.root, model: this.args.model, effort: this.args.effort, permissions: this.args.permissions });
-      if (this.args.gitSync) {
+      if (this.args.gitSync || this.args.gitIntegrationBranch) {
         this.gitSync = new GitSync(this.root, this.args.gitRepo, [this.runDir, taskLease(this.tasks), taskRegistryLease(this.tasks)], this.runDir, this.signal,
-          this.args.gitConflicts === 'worker' ? conflict => this.conflictWorker(conflict) : undefined);
+          this.args.gitConflicts === 'worker' ? conflict => this.conflictWorker(conflict) : undefined,
+          this.args.gitIntegrationBranch, this.args.gitSync);
         try { await this.gitSync.initialize(); await this.gitSync.requirePath(this.tasks); }
         catch (error) { this.gitSync.failed(error); return await this.finish('git_sync_error', 1); }
       } else await this.cli('validate');
       while (!this.args.rounds || this.rows.length < this.args.rounds) {
+        this.control.update({ task: null, round: this.rows.length });
+        await this.controlCheckpoint();
         if (this.signal?.aborted) return this.finish(this.lockError ? 'lock_lost' : 'interrupted', this.lockError ? 1 : 130);
         if (this.gitSync) {
           try {
@@ -374,6 +398,8 @@ export class Runner {
           console.log(JSON.stringify({ event: 'task_session_reset', task_id: id, reason: 'task_contract_changed' }));
         }
         if (!/^[\w.-]+$/.test(id) || id === '.' || id === '..') throw new Error('Unsafe task ID');
+        if (await this.controlCheckpoint() && this.gitSync) continue;
+        if (this.signal.aborted) return await this.finish(this.lockError ? 'lock_lost' : 'interrupted', this.lockError ? 1 : 130);
         await this.status(id, 'in-progress');
         let taskRun = previousRuns, clarification: Clarification | undefined;
         while (true) {
@@ -383,6 +409,7 @@ export class Runner {
           let resumeSessionId = clarification?.sessionId || this.taskSessions.get(id)?.id;
           const row: Record<string, any> = { task_id: id, task_path: relative, task_run: ++taskRun, task_run_limit: limit, started_at: now(), round: this.rows.length + 1, client: this.args.worker ? 'custom' : this.args.client, phase: clarification ? 'clarification' : 'execution', session_resumed: !!resumeSessionId };
           this.rows.push(row); console.log(JSON.stringify({ round: row.round, task_id: id, event: 'started', client: row.client }));
+          this.control.update({ task: id, round: row.round });
           if (this.monitor) {
             Object.assign(this.monitor.record, { role: 'worker', task: id, iteration: row.round, roadmapState: 'in_progress' });
             this.monitorEvent('runner.turn_starting', { task: id, role: 'worker', activityTitle: meta.title });
@@ -519,6 +546,9 @@ export class Runner {
       }
       return await this.finish('round_limit', 0);
     } catch (error) {
+      if (this.control?.status.state !== 'exited' && this.control?.status.revision) this.control.update({ state: 'exited',
+        reason: this.lockError ? 'lock_lost' : this.signal?.aborted ? 'interrupted' : 'runner_error',
+        exit_code: this.lockError ? 1 : this.signal?.aborted ? 130 : 1, ended_at: now() });
       if (this.monitor && !this.monitor.closed) {
         Object.assign(this.monitor.record, { reason: this.lockError ? 'lock_lost' : this.signal?.aborted ? 'interrupted' : 'runner_error', exitCode: this.lockError ? 1 : this.signal?.aborted ? 130 : 1, endedAt: now(), processState: 'exited', roadmapState: 'stopped' });
         await this.monitor.finish().catch(() => {});
@@ -526,7 +556,8 @@ export class Runner {
       throw error;
     } finally {
       originalSignal?.removeEventListener('abort', stop);
-      if (release) { try { await release(); } catch (error) { if (!this.lockError) throw error; } }
+      try { await this.control?.close(); }
+      finally { if (release) { try { await release(); } catch (error) { if (!this.lockError) throw error; } } }
     }
   }
 }

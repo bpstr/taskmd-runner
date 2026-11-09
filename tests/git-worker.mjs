@@ -33,10 +33,18 @@ if (process.env.TASKMD_WORKER_ROLE === 'git-conflict') {
   }
   emit({ status: mode === 'blocked' ? 'blocked' : 'completed', summary: 'Prepared conflict resolution', evidence: ['Prepared resolution inspected'], next_step: 'Fixture owner resolves policy decision' });
 } else {
+  if (process.env.PREPARED_GIT_LOCAL_INTEGRATION) {
+    fs.copyFileSync(path.join(process.cwd(), 'integration.txt'), path.join(process.env.TASKMD_ROUND_DIR, 'integration-seen.txt'));
+  }
   for (const repo of JSON.parse(process.env.PREPARED_GIT_REPOS || '[]')) fs.writeFileSync(path.join(repo, 'finished.txt'), `Prepared task ${path.basename(process.env.TASKMD_TASK_FILE)}\n`);
   if (process.env.PREPARED_GIT_STAGE) git(process.cwd(), ['add', 'finished.txt']);
   const child = spawnSync(process.execPath, [path.join(import.meta.dirname, 'fake-worker.mjs'), 'completed'], { input: prompt, encoding: 'utf8', env: { ...process.env, PREPARED_MODE: process.env.PREPARED_GIT_MODE || 'completed' } });
   if (child.status !== 0) { process.stderr.write(child.stderr); process.exit(child.status || 1); }
+  if (process.env.PREPARED_GIT_LOCAL_INTEGRATION && path.basename(process.env.TASKMD_TASK_FILE).startsWith('001-')) {
+    const integration = process.env.PREPARED_GIT_LOCAL_INTEGRATION;
+    fs.writeFileSync(path.join(integration, 'integration.txt'), 'after first worker\n');
+    git(integration, ['add', 'integration.txt']); git(integration, ['commit', '-m', 'Advance local integration branch']);
+  }
   if (process.env.PREPARED_GIT_ADVANCE_PEER) {
     const peer = process.env.PREPARED_GIT_ADVANCE_PEER, file = path.relative(process.cwd(), process.env.TASKMD_TASK_FILE);
     fs.appendFileSync(path.join(peer, file), '\n## Progress\n\nConcurrent prepared note\n');

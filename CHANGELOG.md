@@ -1,6 +1,14 @@
 # Changelog
 
-## 0.4.0
+## 0.4.0 — 2026-11-09
+
+- Merge an explicitly selected local integration branch before each lane task,
+  with local handoff commits and optional additional upstream Git synchronization.
+- Add local MCP discovery, detached start, compact status and pause/resume/stop
+  control across workspaces and named lanes. Keep existing scope locks,
+  cancellation reconciliation, receipts and monitoring.
+- Automatically attach a self-scoped runner MCP to Codex workers. Pause at task
+  boundaries and return unchanged status revisions without reading worker logs.
 
 - Report taskmd invocations to Roadmap Monitor using its existing v1 protocol.
   Add private connection setup, status/probe controls, heartbeats, task activity,

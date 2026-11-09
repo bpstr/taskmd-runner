@@ -186,9 +186,84 @@ in-progress/blocked tasks require explicit operator reconciliation.
 Runs with disjoint `--task-prefix` subtrees can share a physical task directory.
 Equal, ancestor and descendant prefixes conflict, including any overlap in a
 multi-prefix selection. Filters alone grant no concurrent ownership. Runs without
-prefixes and all `--git-sync` runs remain exclusive. Task scopes coordinate task
+prefixes and all `--git-sync` / `--git-integration-branch` runs remain exclusive. Task scopes coordinate task
 claims; coordinate shared source files, other tools and worktrees through their
 existing owners. A taskmd failure is an error, never an empty queue.
+
+## Local MCP control
+
+Connect Codex Desktop or another MCP host to the runner's stdio server:
+
+```sh
+codex mcp add taskmd_runner -- taskmd-runner mcp
+```
+
+From a source checkout, use absolute paths so the connection works from any
+workspace:
+
+```sh
+codex mcp add taskmd_runner -- node /absolute/path/taskmd-runner/bin/taskmd-runner.js mcp
+```
+
+The shared Codex configuration also supports other MCP hosts' equivalent setup:
+
+```toml
+[mcp_servers.taskmd_runner]
+command = "taskmd-runner"
+args = ["mcp"]
+```
+
+| Tool | Purpose |
+| --- | --- |
+| `runner_list` | Discover active local runs across workspaces; filter by project, paginate, or set `include_exited` for history |
+| `runner_start` | Start a detached runner with an absolute project path, lane and typed CLI options |
+| `runner_status` | Read compact status by exact `run_id`; pass `since_revision` for a small unchanged response |
+| `runner_control` | Send `pause`, `resume` or `stop` to an exact `run_id` |
+
+Start options use snake_case, for example `task_prefixes: ["api"]`,
+`max_task_runs: 5`, `git_sync: true`, or `worker: ["/path/to/custom-worker"]`.
+The defaults and worker budgets are the same as the CLI. Starting a run launches
+real coding workers; it requires the same user authorization as a CLI launch.
+Closing the MCP client or Desktop chat leaves detached runs running.
+
+Each invocation has its own run ID. A lane name belongs to one canonical
+workspace, so `api` can run in multiple workspaces at once. Only one invocation
+can own a workspace/lane pair. Within a workspace, use distinct lane names and
+disjoint `task_prefixes` to run concurrently; existing task-directory locks reject
+overlapping scopes. Git synchronization and local integration retain an exclusive
+task-store lock within each checkout.
+CLI launches are discoverable too: `--lane api --task-prefix api`. Without
+`--lane`, task-prefix launches derive a stable scope lane; other launches use
+`main`. MCP starts default to `main`, so name concurrent lanes explicitly.
+
+Pause returns `pausing` immediately, finishes the current task round and its
+normal receipt, validation and Git handoff, then becomes `paused` before another
+task claim. It retains its locks and monitor heartbeat until resumed or stopped.
+A drained queue or round cap can finish before reaching another pause boundary.
+Stop uses the existing cancellation/reconciliation behavior: an interrupted
+worker's task becomes blocked and the runner exits with `interrupted` / 130.
+Resume applies only to a live paused run; start a new invocation after exit.
+An unreachable endpoint is reported as `unreachable`, never assumed exited or
+controlled by signaling a saved PID.
+
+Codex task and conflict workers automatically receive a self-scoped MCP exposing
+only `runner_status` and `runner_control`. They can omit `run_id` and cannot
+select another run through that connection. A worker requesting pause should
+finish its normal result without waiting for `paused`. Other clients can connect
+`taskmd-runner mcp --self` with the inherited `TASKMD_RUNNER_SELF_ID`,
+`TASKMD_RUNNER_SELF_ENDPOINT` and `TASKMD_RUNNER_SELF_TOKEN` environment variables.
+Connections receiving these environment variables also scope themselves to the current run.
+This limits tool targeting; it is not an OS sandbox against a worker that already
+has access to the user's files and processes.
+
+Controllers bind authenticated, random loopback ports. Private controller records
+and launch logs live under the user-level runner state directory's `control/`
+subdirectory (override with `TASKMD_RUNNER_CONTROL_DIR`, consistently in runners
+and MCP clients). Status never includes controller tokens, worker logs or
+prompts. Terminal records remain available after exit. Existing run directories,
+receipts, notifications and Roadmap Monitor reporting continue unchanged, with
+pause/resume events added. Status is assembled locally without a model call;
+actual conversation token savings have not been measured.
 
 ## Roadmap Monitor reporting
 
@@ -235,6 +310,33 @@ can retry one stored stream using an already verified connection. Saved settings
 and retained reports survive package updates.
 
 ## Git synchronization
+
+For lanes in separate local checkouts, merge a shared local integration branch
+before each new task:
+
+```sh
+taskmd-runner --project /path/to/lane --lane api --task-prefix api \
+  --git-integration-branch main
+```
+
+The runner merges `refs/heads/main` into the lane's current branch before selecting
+work, then validates tasks and dependencies. Accepted handoffs become local commits
+so the next merge starts from a clean checkout. Linked worktrees share this local
+branch ref. Independent clones must each have the integration branch kept current.
+The integration process advances that shared branch; the runner merges it into
+the lane and retains the lane's branch identity. This mode needs no remote or
+upstream and makes no network calls. Receipts label local handoffs `committed`.
+
+Use `git_integration_branch: "main"` with MCP `runner_start`. Add `git_sync: true`
+(CLI `--git-sync`) to also fetch/merge the lane's configured upstream and push
+accepted handoffs there. The local integration branch and the lane's upstream
+are separate sources. A pause during selection refreshes Git and reselects work
+after resume. In-task continuations keep their current working changes; merges
+happen at task boundaries. All selected `--git-repo` checkouts must contain the
+named local branch. Existing conflict handling applies to both modes.
+
+Git-managed lanes require separate checkouts. Their whole-task-store lease
+prevents a merge from changing files underneath a worker in the same checkout.
 
 Opt in for a repository with a configured tracking branch:
 
