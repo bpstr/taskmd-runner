@@ -33,7 +33,7 @@ Select pending taskmd work, claim it, run one worker, validate and repeat.
   --git-sync             Fetch/merge before tasks; commit/push valid rounds
   --git-integration-branch NAME  Merge a local branch before each task; commit handoffs
   --git-repo PATH        Repeatable repository path (default project checkout)
-  --git-conflicts MODE   stop (default) or worker for a dedicated resolver
+  --git-conflicts MODE   skip (default), stop, or worker for a dedicated resolver
   --notify POLICY       attention (default) or off
   --notify-on EVENT      Additional alert; repeatable or comma-separated:
                         ${notificationEvents.join(', ')}
@@ -43,7 +43,7 @@ Select pending taskmd work, claim it, run one worker, validate and repeat.
   monitor test|status|enable|disable|flush [--json]   Roadmap Monitor reporting
 `;
 export function parseArgs(argv: string[]): Options {
-  const options: Options = { project: '', taskmd: 'taskmd', filter: [], rounds: 0, maxTaskRuns: 5, blockAfterRuns: 3, timeout: 7200, client: 'codex', sandbox: 'workspace-write', permissions: 'default', notify: 'attention', notifyOn: [], gitSync: false, gitRepo: [], gitConflicts: 'stop' };
+  const options: Options = { project: '', taskmd: 'taskmd', filter: [], rounds: 0, maxTaskRuns: 5, blockAfterRuns: 3, timeout: 7200, client: 'codex', sandbox: 'workspace-write', permissions: 'default', notify: 'attention', notifyOn: [], gitSync: false, gitRepo: [], gitConflicts: 'skip' };
   const strings: Record<string, keyof Options> = { '--project': 'project', '--config': 'config', '--task-dir': 'taskDir', '--state-dir': 'stateDir', '--taskmd': 'taskmd', '--model': 'model', '--effort': 'effort', '--client': 'client', '--sandbox': 'sandbox', '--executable': 'executable', '--permissions': 'permissions', '--notify': 'notify' };
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
@@ -77,7 +77,7 @@ export function parseArgs(argv: string[]): Options {
   if (!['default', 'bypass'].includes(options.permissions)) throw new Error('Invalid permissions');
   if (options.codexSessionPolicy !== undefined && !['isolated', 'shared'].includes(options.codexSessionPolicy)) throw new Error('Invalid Codex session policy');
   if (!['attention', 'off'].includes(options.notify)) throw new Error('Invalid notification policy');
-  if (!['stop', 'worker'].includes(options.gitConflicts)) throw new Error('Invalid Git conflict policy');
+  if (!['skip', 'stop', 'worker'].includes(options.gitConflicts)) throw new Error('Invalid Git conflict policy');
   if (!options.gitSync && !options.gitIntegrationBranch && (options.gitRepo.length || options.gitConflicts === 'worker')) throw new Error('--git-repo and --git-conflicts worker require --git-sync or --git-integration-branch');
   if (options.notifyOn.some(event => !notificationEvents.includes(event))) throw new Error('Unknown notification event');
   if (options.client === 'codex') {

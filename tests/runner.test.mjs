@@ -168,15 +168,15 @@ test('Codex timeout retries within the task budget then continues independent wo
   const independent = task(root, '003');
   const r = await run(root, 'timeout-first', ['--timeout', '1'], true);
   assert.equal(r.code, 2, r.stderr); assert.equal(r.summary.reason, 'no_ready_tasks');
-  assert.deepEqual(r.summary.rounds.map(row => row.task_id), ['001', '001', '001', '003']);
+  assert.deepEqual(r.summary.rounds.map(row => row.task_id), ['001', '003', '001', '001']);
   assert.equal(readTask(file).meta.status, 'blocked'); assert.equal(taskRuns(file), 3);
   assert.equal(readTask(dependent).meta.status, 'pending');
   assert.equal(readTask(independent).meta.status, 'completed');
   assert.match(r.summary.rounds[0].error, /codex timed-out \(124\)/);
   assert.equal(r.summary.rounds[0].recovery_reason, 'timeout');
-  assert.equal(r.summary.rounds[1].session_resumed, true);
-  assert.equal(r.summary.rounds[2].blocked_reason, 'task_run_limit');
-  assert.equal(r.summary.rounds[3].session_resumed, false);
+  assert.equal(r.summary.rounds[2].session_resumed, true);
+  assert.equal(r.summary.rounds[3].blocked_reason, 'task_run_limit');
+  assert.equal(r.summary.rounds[1].session_resumed, false);
   assert.equal(r.events.find(event => event.event === 'task_blocked').next_action, 'select_next_task');
   const folder = path.join(path.dirname(r.events.find(event => event.summary).summary), '001-001');
   const agent = JSON.parse(fs.readFileSync(path.join(folder, 'agent.json'), 'utf8'));
@@ -210,7 +210,7 @@ for (const [mode, adapter] of [['timeout-once', true], ['crash-once', true], ['c
     const r = await run(root, mode, ['--timeout', '1'], adapter);
     assert.equal(r.code, 0, r.stderr); assert.equal(r.summary.reason, 'empty');
     assert.deepEqual(r.summary.rounds.map(row => row.status), ['pending', 'completed']);
-    assert.equal(r.summary.rounds[0].next_action, 'retry_task');
+    assert.equal(r.summary.rounds[0].next_action, 'select_next_task');
     assert.equal(readTask(file).meta.status, 'completed'); assert.equal(taskRuns(file), 2);
     assert.equal(r.summary.blocked_tasks.length, 0);
     assert.equal(r.events.filter(event => event.event === 'task_retry').length, 1);
@@ -356,15 +356,59 @@ for (const race of ['claim', 'dependency']) {
     else assert.equal(readTask(path.join(root, 'tasks/002-task.md')).meta.status, 'pending');
   });
 }
+for (const mode of ['pending-first', 'exit-first']) test(`${mode} yields to independent work before exhausting the invocation cap`, async t => {
+  const root = fixture(t), stalled = task(root, '001', { priority: 'critical' });
+  const dependent = task(root, '002', { dependencies: ['001'] });
+  const independent = task(root, '003');
+  const r = await run(root, mode, ['--rounds', '2']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.summary.reason, 'round_limit');
+  assert.deepEqual(r.summary.rounds.map(row => row.task_id), ['001', '003']);
+  assert.equal(readTask(stalled).meta.status, 'pending');
+  assert.equal(taskRuns(stalled), 1);
+  assert.equal(readTask(dependent).meta.status, 'pending');
+  assert.equal(readTask(independent).meta.status, 'completed');
+  assert.equal(r.summary.rounds[0].next_action, 'select_next_task');
+});
+test('deferred selection expands past a full page and stops at the first fresh candidate', async t => {
+  const root = fixture(t);
+  const runner = new Runner(parseArgs(['--project', root]));
+  const deferred = Array.from({ length: 64 }, (_, n) => ({ id: String(n) }));
+  runner.deferredTasks = new Set(deferred.map(task => task.id));
+  const limits = [];
+  runner.cliJson = async (...args) => {
+    const limit = Number(args[args.indexOf('--limit') + 1]);
+    limits.push(limit);
+    return [...deferred, { id: 'fresh' }, { id: 'unrelated' }].slice(0, limit);
+  };
+  runner.inScope = task => {
+    assert.notEqual(task.id, 'unrelated', 'selection ends once an eligible task is found');
+    return true;
+  };
+  assert.deepEqual(await runner.nextTasks(), [{ id: 'fresh' }]);
+  assert.deepEqual(limits, [64, 256]);
+});
+test('all deferred tasks get another pass while preserving run limits', async t => {
+  const root = fixture(t);
+  const first = task(root, '001', { priority: 'critical' });
+  const second = task(root, '002', { priority: 'high' });
+  const r = await run(root, 'pending', ['--rounds', '4']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual(r.summary.rounds.map(row => row.task_id), ['001', '002', '001', '002']);
+  assert.equal(taskRuns(first), 2);
+  assert.equal(taskRuns(second), 2);
+  assert.equal(readTask(first).meta.status, 'pending');
+  assert.equal(readTask(second).meta.status, 'pending');
+});
 test('pending without checked progress retries within budget then continues independent work', async t => {
   const root = fixture(t), file = task(root, '001', { priority: 'critical' });
   const dependent = task(root, '002', { dependencies: ['001'] }); task(root, '003');
   const r = await run(root, 'pending-first');
   assert.equal(r.code, 2, r.stderr); assert.equal(r.summary.reason, 'no_ready_tasks');
-  assert.deepEqual(r.summary.rounds.map(row => row.task_id), ['001', '001', '001', '003']);
+  assert.deepEqual(r.summary.rounds.map(row => row.task_id), ['001', '003', '001', '001']);
   assert.equal(readTask(file).meta.status, 'blocked'); assert.equal(readTask(dependent).meta.status, 'pending');
   assert.equal(r.summary.rounds[0].recovery_reason, 'no_progress');
-  assert.equal(r.summary.rounds[2].blocked_reason, 'task_run_limit');
+  assert.equal(r.summary.rounds[3].blocked_reason, 'task_run_limit');
   assert.equal(r.events.find(event => event.event === 'task_blocked').next_action, 'select_next_task');
 });
 for (const mode of ['false-completion', 'scope', 'status', 'malformed', 'exit', 'timeout']) {
@@ -374,7 +418,10 @@ for (const mode of ['false-completion', 'scope', 'status', 'malformed', 'exit', 
     const r = await run(root, mode + '-first', mode === 'timeout' ? ['--timeout', '0.1'] : []);
     assert.equal(r.code, 2, r.stderr); assert.equal(r.summary.reason, 'no_ready_tasks');
     const attempts = ['false-completion', 'malformed'].includes(mode) ? 2 : ['exit', 'timeout'].includes(mode) ? 3 : 1;
-    assert.deepEqual(r.summary.rounds.map(row => row.task_id), [...Array(attempts).fill('001'), '003']);
+    const expected = ['exit', 'timeout'].includes(mode)
+      ? ['001', '003', ...Array(attempts - 1).fill('001')]
+      : [...Array(attempts).fill('001'), '003'];
+    assert.deepEqual(r.summary.rounds.map(row => row.task_id), expected);
     assert.equal(readTask(file).meta.status, 'blocked'); assert.equal(readTask(dependent).meta.status, 'pending');
     assert.equal(readTask(path.join(root, 'tasks/003-task.md')).meta.status, 'completed');
     assert.equal(r.events.find(event => event.event === 'task_blocked').next_action, 'select_next_task');

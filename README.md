@@ -39,6 +39,10 @@ the blocker and requests owner review or splitting into subtasks that collective
 preserve the original scope and acceptance criteria. This request appears in the
 task handoff and run summary, and in the receipt when a worker reaches the limit.
 The runner selects independent ready work; dependent tasks remain gated.
+After a timeout, worker failure or pending handoff without verified progress,
+the task stays pending and yields to other ready tasks. Once those tasks have
+had a turn, the runner retries deferred work in taskmd order within the retained
+task and invocation limits. Verified partial work can continue in priority order.
 These limits are separate from `--rounds`, which caps workers for the whole
 invocation. Each worker has a two-hour timeout by default (`--timeout 7200`),
 allowing up to six hours over three runs. To allow five sessions for a task that has
@@ -346,8 +350,8 @@ Use `git_integration_branch: "main"` with MCP `runner_start`. Add `git_sync: tru
 accepted handoffs there. The local integration branch and the lane's upstream
 are separate sources. A pause during selection refreshes Git and reselects work
 after resume. In-task continuations keep their current working changes; merges
-happen at task boundaries. All selected `--git-repo` checkouts must contain the
-named local branch. Existing conflict handling applies to both modes.
+happen at task boundaries. The named local branch must be present in each
+selected `--git-repo` checkout for integration to run.
 
 Git-managed lanes require separate checkouts. Their whole-task-store lease
 prevents a merge from changing files underneath a worker in the same checkout.
@@ -380,8 +384,11 @@ Keep `.taskmd-runner/` ignored or store evidence outside the repositories.
 If synchronization changes the runner configuration, restart so the controller
 can acquire the correct task-directory lease and workflow settings.
 
-Conflicts stop the runner by default. `--git-conflicts worker` starts one
-dedicated session using the selected client, model, permissions and timeout.
+By default, `--git-conflicts skip` aborts a merge conflict created by the current
+runner, verifies that the checkout is clean, and continues with local commits.
+`--git-conflicts stop` preserves the merge for manual resolution.
+`--git-conflicts worker` starts one dedicated session using the selected client,
+model, permissions and timeout.
 That worker edits only the supplied conflicted files. The controller checks the
 resolution and stages, commits and pushes it. Conflict sessions have separate
 receipts under `git-conflicts/`; they do not consume task `--rounds`. There is at
@@ -389,13 +396,18 @@ most one resolver per repository at each pre-task or publication boundary.
 Custom workers receive `TASKMD_WORKER_ROLE=git-conflict` and the repository in
 `TASKMD_GIT_REPOSITORY`; their stdin contains the scoped resolution instructions.
 
-Synchronization errors exit with `git_sync_error` and stop further task workers.
-A failed push preserves local commits and completed task status. If upstream
-advanced during a worker, the controller fetches, integrates it and retries the
-push once. A multi-repository failure can leave some repositories already pushed;
-`git-sync.json` and the summary identify each completed step. Merges and local
-changes remain available for recovery. The controller never force-pushes,
-stashes, resets, or switches branches.
+An unavailable upstream, missing integration branch, or rejected push pauses
+fetches, merges and pushes for the rest of the run. The runner emits one
+`git_sync_warning` on stderr, sends an attention notification when enabled, and
+keeps committing accepted handoffs locally. Receipts label those handoffs
+`committed`. See `git-sync.json` or the summary for the failure and any pushes
+that already succeeded. After fixing the issue, a later synchronized handoff can
+publish the retained commits, or you can reconcile and push them manually.
+
+If upstream advances during a worker, the controller still tries to integrate
+it and retry the push once. An unfinished operation, failed conflict resolution,
+or an unsafe checkout exits with `git_sync_error` and preserves the checkout for
+reconciliation.
 
 ## Worker commands and locking
 

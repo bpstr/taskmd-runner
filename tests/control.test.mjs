@@ -181,7 +181,7 @@ test('MCP detached start, boundary pause/resume and stop retain prepared task re
   assert.equal(JSON.parse(fs.readFileSync(path.join(finished.run_dir, 'summary.json'))).rounds.length, 2);
   assert.equal((await nextClient.tool('runner_control', { run_id: id, action: 'resume' })).error, true);
   const gitStart = await nextClient.tool('runner_start', { project: root, lane: 'git-option', notify: 'off',
-    git_integration_branch: 'main', worker: [process.execPath, fake] });
+    git_integration_branch: 'main', git_conflicts: 'skip', worker: [process.execPath, fake] });
   assert.equal(gitStart.error, false, JSON.stringify(gitStart.value));
   const gitFailed = await waitFor(() => runStatus(gitStart.value.run_id), s => s.state === 'exited', 'local Git option forwarding');
   assert.equal(gitFailed.reason, 'git_sync_error', 'MCP forwards local Git mode even without upstream sync');

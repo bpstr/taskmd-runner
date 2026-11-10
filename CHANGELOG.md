@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.2 — 2026-11-10
+
+- Give independent ready tasks a turn before retrying timeouts, worker failures
+  and pending handoffs without verified progress. Retain task budgets and
+  dependency gates, and retry deferred tasks after each pass through ready work.
+- Continue with local commits after recoverable Git synchronization failures.
+  Emit an attention warning and pause integration and publication for the run.
+  Restore clean checkouts after conflicts by default. Keep explicit conflict
+  stop and dedicated resolver policies.
+
 ## 0.4.1 — 2026-11-10
 
 - Add opt-in review of worker-reported blockers within the current task round.

@@ -1,5 +1,44 @@
 # Runner validation
 
+## 0.4.2 GitHub release
+
+The release combines fair scheduling of retryable task failures with the requested
+Git-sync fallback. Use the latest 0.4.1 release as the base, preserving its blocker
+review. The release worktree excludes unrelated local diagnostics and monitoring
+edits. Target GitHub and its attached npm archive, matching previous releases.
+
+The two-round starvation regressions both failed before scheduling changed.
+They repeated task 001 and left independent task 003 untouched. Prepared workers
+will verify that 003 runs before the invocation cap, dependencies stay gated,
+deferred tasks get another pass, and task counters and sessions survive retries.
+Run the focused runner selector, the Git fixture file, and detached MCP startup.
+Build TypeScript, then install the packed archive offline and verify version,
+help, MCP discovery and every packaged file. Keep logs in the parent release
+directory. All checks use prepared responses and local Git remotes.
+
+The Git fixture file is required because publication now checkpoints every
+checkout before remote synchronization. Focused runner cases cover the changed
+scheduler, failure recovery, blockers, task scope, sessions and limits. Reuse
+unaffected 0.4.1 evidence for other adapters and monitor transports. Expected
+check cost under two minutes, plus offline packaging. The release gate uses
+affected checks and offline artifact verification.
+
+Results. The build and 79 distinct prepared cases passed across the runner,
+Git and MCP selectors. The initial Git run exposed two assertions of the old
+retry order. After updating those expectations, both cases passed with task 002
+published before the retries of task 001. The final seven-case selection check
+also proves expansion past 64 deferred tasks and short-circuiting at the first
+fresh candidate. Original failed logs remain alongside the passing receipts.
+
+The 57-file archive installed offline and every file matched both the release
+checkout and the installed package. The installed CLI reported 0.4.2, listed
+the skip conflict default and retained blocker review. The MCP initialize and
+tools-list exchange reported 0.4.2, all four expected tools, the three conflict
+policies and the review-blockers Boolean. The archive is 95,823 bytes with SHA-256
+`69a6a546040ea70309bb4393ff8b65f5a564e7f1789650882ad432b14446a13b`.
+Evidence is in `.taskmd-runner/release-0.4.2/` in the primary checkout.
+
+
 ## 0.4.1 GitHub release
 
 The blocker review changes worker dispatch, handoff validation, and the CLI and

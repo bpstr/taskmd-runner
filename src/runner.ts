@@ -9,7 +9,7 @@ import { runAgent, buildRunnerInvocation, type ClientName, type Usage } from '@b
 import { command } from './process.js';
 import { readTask, contract, checks, verifiedCount, progress, taskRuns, setTaskRuns, now } from './task.js';
 import { Notifications, type NotificationOptions } from './notifications.js';
-import { GitSync, type GitConflict } from './git.js';
+import { GitSync, type GitConflict, type GitConflictPolicy } from './git.js';
 import { acquireTaskLock, taskLease, taskRegistryLease } from './lock.js';
 import { isolatedCodexHome } from './codex.js';
 import { attachMonitor, flushMonitor, type MonitorReporter } from './monitor.js';
@@ -26,7 +26,7 @@ export interface Options extends NotificationOptions {
   codexSessionPolicy?: 'isolated' | 'shared';
   sandbox: 'workspace-write' | 'danger-full-access'; permissions: 'default' | 'bypass';
   model?: string; effort?: string; worker?: string[];
-  gitSync: boolean; gitRepo: string[]; gitConflicts: 'stop' | 'worker'; gitIntegrationBranch?: string;
+  gitSync: boolean; gitRepo: string[]; gitConflicts: GitConflictPolicy; gitIntegrationBranch?: string;
 }
 export interface WorkerResult {
   status: 'pending' | 'blocked' | 'completed' | 'in-review';
@@ -83,6 +83,7 @@ export class Runner {
   taskPrefixes: string[];
   blockedTasks: Record<string, any>[] = [];
   private unavailableTasks = new Map<string, string>();
+  private deferredTasks = new Set<string>();
   private taskSessions = new Map<string, { id: string; contract: ReturnType<typeof contract> }>();
   gitSync?: GitSync;
   private lockError?: string;
@@ -141,15 +142,21 @@ export class Runner {
     return within(file) && within(fs.realpathSync(file));
   }
   async nextTasks(): Promise<Record<string, any>[]> {
-    // Preserve taskmd's native phase/priority/dependency order; stop expanding
+    // Preserve taskmd's order within each pass through ready work; stop expanding
     // as soon as an allowed candidate appears. The search is always bounded.
-    const expand = this.taskPrefixes.length > 0 || this.unavailableTasks.size > 0;
+    const expand = this.taskPrefixes.length > 0 || this.unavailableTasks.size > 0 || this.deferredTasks.size > 0;
+    let deferred: Record<string, any> | undefined;
     for (let limit = expand ? 64 : 1; limit <= 4096; limit *= 4) {
       const rows = await this.cliJson('next', '--format', 'json', '--strict-priority', '--limit', String(limit), '--filter', 'status=pending', ...this.filters);
       if (!Array.isArray(rows)) throw new Error('Unexpected taskmd next response; not an empty backlog');
-      const candidate = rows.find(task => !this.unavailableTasks.has(String(task.id)) && this.inScope(task));
+      const candidate = rows.find(task => !this.unavailableTasks.has(String(task.id)) && !this.deferredTasks.has(String(task.id)) && this.inScope(task));
       if (candidate) return [candidate];
-      if (!expand || rows.length < limit) return [];
+      deferred ??= rows.find(task => !this.unavailableTasks.has(String(task.id)) && this.inScope(task));
+      if (!expand || rows.length < limit) {
+        // Start another pass only after every other ready task has had a turn.
+        if (deferred) this.deferredTasks.clear();
+        return deferred ? [deferred] : [];
+      }
     }
     throw new Error('Scoped selection reached 4096 candidates; narrow the taskmd filters');
   }
@@ -178,17 +185,16 @@ export class Runner {
     if (!this.gitSync) return true;
     const acceptedJournal = readTask(file).body.split('\n## Progress').slice(1).join('\n## Progress').trim();
     try {
-      await this.gitSync.after(row.round, row.task_id, row.status, async () => {
+      row.git_sync = await this.gitSync.after(row.round, row.task_id, row.status, async () => {
         const merged = readTask(file), journal = merged.body.split('\n## Progress').slice(1).join('\n## Progress');
         if (!isDeepStrictEqual(contract(file), before) || merged.meta.status !== row.status || taskRuns(file) !== row.task_run || !journal.includes(acceptedJournal) || ((row.status === 'completed' || row.status === 'in-review') && checks(file)[1])) throw new Error('Git integration changed the accepted task contract, status or handoff');
         await this.cli('validate');
       });
-      row.git_sync = this.args.gitSync ? 'pushed' : 'committed';
     } catch (error) {
       this.gitSync.failed(error); row.git_sync = 'failed'; row.git_error = this.gitSync.error;
     }
     jsonFile(path.join(folder, 'receipt.json'), row);
-    return row.git_sync === (this.args.gitSync ? 'pushed' : 'committed');
+    return row.git_sync !== 'failed';
   }
   async record(file: string, message: string, handoff = false, workerNotes = '') {
     if (!this.worklogs) { progress(file, message); return; }
@@ -338,7 +344,10 @@ export class Runner {
       if (this.args.gitSync || this.args.gitIntegrationBranch) {
         this.gitSync = new GitSync(this.root, this.args.gitRepo, [this.runDir, taskLease(this.tasks), taskRegistryLease(this.tasks)], this.runDir, this.signal,
           this.args.gitConflicts === 'worker' ? conflict => this.conflictWorker(conflict) : undefined,
-          this.args.gitIntegrationBranch, this.args.gitSync);
+          this.args.gitIntegrationBranch, this.args.gitSync, this.args.gitConflicts, async warning => {
+            console.warn(JSON.stringify({ event: 'git_sync_warning', requires_attention: true, ...warning, next_action: 'continue_with_local_commits' }));
+            await this.notifications.send('runner.needs_attention', this.root);
+          });
         try { await this.gitSync.initialize(); await this.gitSync.requirePath(this.tasks); }
         catch (error) { this.gitSync.failed(error); return await this.finish('git_sync_error', 1); }
       } else await this.cli('validate');
@@ -487,6 +496,11 @@ export class Runner {
             if (row.review_request) await this.record(file, row.review_request);
             await this.status(id, status); await this.cli('validate');
             Object.assign(row, { status, ended_at: now(), checked_before: count[0], checked_after: checks(file)[0], verified_before: verifiedBefore, verified_after: verifiedCount(file), result });
+            if (status === 'pending' && noProgress) {
+              this.deferredTasks.add(id);
+              row.next_action = 'select_next_task';
+              console.log(JSON.stringify({ event: 'task_deferred', task_id: id, reason: 'no_progress', next_action: row.next_action }));
+            }
             if (!await this.publishRound(row, folder, file, before)) return await this.finish(this.lockError ? 'lock_lost' : this.signal?.aborted ? 'interrupted' : 'git_sync_error', this.lockError ? 1 : this.signal?.aborted ? 130 : 1);
             if (this.monitor) { this.monitor.state.sessionId = row.provider_thread_id ?? null; this.monitor.record.role = 'worker'; }
             this.monitorEvent('runner.task_result', { task: id, sessionId: row.provider_thread_id ?? null, operation: result.summary, outcome: status, nextRecordedStep: result.next_step, resultObservedAt: row.ended_at, progressVerified: status === 'completed' || status === 'in-review' || row.verified_after > row.verified_before || row.checked_after > row.checked_before });
@@ -514,14 +528,15 @@ export class Runner {
             let intact = false;
             try { intact = isDeepStrictEqual(contract(file), before) && readTask(file).meta.status === 'in-progress' && taskRuns(file) === row.task_run; } catch {}
             if (error instanceof WorkerFailure && intact && !row.archival_error && !this.signal?.aborted && !this.lockError && row.task_run < limit) {
-              Object.assign(row, { status: 'pending', recovery_reason: error.kind, error: message, ended_at: now(), next_action: 'retry_task' });
+              Object.assign(row, { status: 'pending', recovery_reason: error.kind, error: message, ended_at: now(), next_action: 'select_next_task' });
+              this.deferredTasks.add(id);
               await this.record(file, `Worker attempt interrupted: ${message}. Changes are retained and are not assumed verified. Continue from the current files and retained evidence: ${folder}.`, true);
               await this.status(id, 'pending'); await this.cli('validate');
               if (!await this.publishRound(row, folder, file, before)) return await this.finish(this.lockError ? 'lock_lost' : this.signal?.aborted ? 'interrupted' : 'git_sync_error', this.lockError ? 1 : this.signal?.aborted ? 130 : 1);
               if (error.kind !== 'context_limit' && this.args.client === 'codex' && !this.args.worker && row.provider_thread_id)
                 this.taskSessions.set(id, { id: row.provider_thread_id, contract: before });
               else this.taskSessions.delete(id);
-              console.log(JSON.stringify({ event: 'task_retry', task_id: id, round: row.round, reason: error.kind, next_action: 'retry_task' }));
+              console.log(JSON.stringify({ event: 'task_retry', task_id: id, round: row.round, reason: error.kind, next_action: 'select_next_task' }));
               break;
             }
             if (error instanceof InvalidResponse && intact && !row.archival_error && !clarification && !this.signal?.aborted && !this.lockError && row.task_run < limit && (!this.args.rounds || this.rows.length < this.args.rounds)) {

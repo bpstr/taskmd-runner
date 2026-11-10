@@ -9,10 +9,10 @@ local `refs/heads/main` into a lane before each task boundary and commits accept
 handoffs locally. Linked worktrees share that integration ref; each lane owns a
 separate checkout. Optional `--git-sync` additionally synchronizes the lane's
 configured remote tracking branch. The runner preserves the lane branch and
-its configured push target. Missing local branches or conflicts
-stop before claiming work; conflict workers remain an explicit option. This does
-not implement the proposed cross-machine claim publication or dependency polling
-below. Prepared evidence is recorded in `docs/validation.md`.
+its configured push target. The failure policy in the [README](../README.md#git-synchronization)
+supersedes the stop-on-error behavior described in this investigation. The
+cross-machine claim publication and dependency polling below remain proposals.
+Prepared evidence is recorded in `docs/validation.md`.
 
 ## Recommendation
 
@@ -31,7 +31,7 @@ and integration of concurrent source changes. Existing task scopes solve the
 first under an explicit allocation agreement. Git can transport the second.
 The third still requires conflict handling and affected verification.
 
-## Existing implementation
+## Implementation at the time of the investigation
 
 | Area | Current behavior | Consequence for multiple machines |
 | --- | --- | --- |

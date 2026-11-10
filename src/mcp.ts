@@ -32,7 +32,7 @@ const startSchema = z.object({
   sandbox: z.enum(['workspace-write', 'danger-full-access']).optional(),
   git_sync: z.boolean().optional(), git_repos: z.array(z.string()).max(64).optional(),
   git_integration_branch: z.string().min(1).optional().describe('Local integration branch, e.g. main. Merge before each task and commit handoffs; git_sync additionally fetches/pushes upstream.'),
-  git_conflicts: z.enum(['stop', 'worker']).optional(),
+  git_conflicts: z.enum(['skip', 'stop', 'worker']).optional(),
 }).strict();
 
 export function createRunnerMcp(self = false) {

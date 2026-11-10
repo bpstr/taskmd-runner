@@ -5,6 +5,8 @@ import { command } from './process.js';
 
 interface Repository { path: string; branch: string; remote: string; remoteRef: string; upstream: string; head: string }
 export interface GitConflict { repository: string; files: string[]; folder: string; phase: string }
+export type GitConflictPolicy = 'skip' | 'stop' | 'worker';
+export interface GitSyncWarning { repository: string; phase: string; error: string }
 type Resolver = (conflict: GitConflict) => Promise<void>;
 const split = (value: string) => value.split('\0').filter(Boolean);
 const inside = (root: string, file: string) => file === root || file.startsWith(root + path.sep);
@@ -15,10 +17,12 @@ export class GitSync {
   repositories: Repository[] = [];
   events: Record<string, unknown>[] = [];
   error?: string;
+  private warning?: GitSyncWarning;
   private serial = 0;
   constructor(private project: string, private paths: string[], private excluded: string[],
     private directory: string, private signal?: AbortSignal, private resolver?: Resolver,
-    private integrationBranch?: string, private syncUpstream = true) {}
+    private integrationBranch?: string, private syncUpstream = true, private conflictPolicy: GitConflictPolicy = 'skip',
+    private warn?: (warning: GitSyncWarning) => Promise<void>) {}
 
   private async git(root: string, ...args: string[]) {
     try {
@@ -33,11 +37,18 @@ export class GitSync {
     fs.writeFileSync(path.join(this.directory, 'git-sync.json'), JSON.stringify(this.state(), null, 2) + '\n');
   }
   state() { return { repositories: this.repositories, events: this.events, upstream_sync: this.syncUpstream,
-    ...(this.integrationBranch ? { integration_branch: this.integrationBranch } : {}), ...(this.error ? { error: this.error } : {}) }; }
+    ...(this.integrationBranch ? { integration_branch: this.integrationBranch } : {}),
+    ...(this.warning ? { warning: this.warning } : {}), ...(this.error ? { error: this.error } : {}) }; }
   private event(event: string, repository: string, detail: Record<string, unknown> = {}) {
     this.events.push({ event, repository, at: new Date().toISOString(), ...detail }); this.save();
   }
   failed(error: unknown) { this.error = error instanceof Error ? error.message : String(error); this.save(); }
+  private async skipSync(repository: string, phase: string, error: unknown) {
+    if (this.signal?.aborted) throw error;
+    this.warning = { repository, phase, error: error instanceof Error ? error.message : String(error) };
+    this.event('sync_skipped', repository, { phase, error: this.warning.error });
+    await this.warn?.(this.warning);
+  }
   private ignored(repo: string, file: string) { return this.excluded.some(root => inside(root, path.resolve(repo, file))); }
   private async changed(repo: string) {
     const [staged, unstaged, untracked] = await Promise.all([
@@ -58,6 +69,11 @@ export class GitSync {
     const head = (await this.git(repo.path, 'rev-parse', 'HEAD')).trim();
     if (branch !== repo.branch || head !== repo.head) throw new Error(`Git branch or HEAD changed outside the controller in ${repo.path}`);
   }
+  private async requireClean(repo: Repository, phase: string) {
+    await this.identity(repo);
+    await this.operation(repo.path);
+    if ((await this.changed(repo.path)).length) throw new Error(`Git checkout became dirty ${phase}: ${repo.path}`);
+  }
   async initialize() {
     for (const selected of this.paths.length ? this.paths : [this.project]) {
       const cwd = fs.realpathSync(path.resolve(this.project, selected));
@@ -71,16 +87,17 @@ export class GitSync {
       if (dirty.length) throw new Error(`Git sync requires a clean checkout in ${root}: ${dirty.slice(0, 8).join(', ')}`);
       const branch = (await this.git(root, 'symbolic-ref', '--short', 'HEAD')).trim();
       let upstream = '', remote = '', remoteRef = '';
-      if (this.syncUpstream) {
-        upstream = (await this.git(root, 'rev-parse', '--symbolic-full-name', '@{upstream}')).trim();
-        remote = (await this.git(root, 'config', '--get', `branch.${branch}.remote`)).trim();
-        remoteRef = (await this.git(root, 'config', '--get', `branch.${branch}.merge`)).trim();
-        if (!remote || remote === '.' || remote.startsWith('-') || !remoteRef.startsWith('refs/heads/')) throw new Error(`Git sync needs a configured remote tracking branch in ${root}`);
+      if (this.syncUpstream && !this.warning) {
+        try {
+          upstream = (await this.git(root, 'rev-parse', '--symbolic-full-name', '@{upstream}')).trim();
+          remote = (await this.git(root, 'config', '--get', `branch.${branch}.remote`)).trim();
+          remoteRef = (await this.git(root, 'config', '--get', `branch.${branch}.merge`)).trim();
+          if (!remote || remote === '.' || remote.startsWith('-') || !remoteRef.startsWith('refs/heads/')) throw new Error(`Git sync needs a configured remote tracking branch in ${root}`);
+        } catch (error) { await this.skipSync(root, 'configure upstream', error); }
       }
       if (this.integrationBranch !== undefined) {
         if (!this.integrationBranch || this.integrationBranch.startsWith('-')) throw new Error('Invalid local integration branch');
         await this.git(root, 'check-ref-format', `refs/heads/${this.integrationBranch}`);
-        await this.git(root, 'show-ref', '--verify', `refs/heads/${this.integrationBranch}`);
       }
       await this.git(root, 'var', 'GIT_AUTHOR_IDENT'); await this.git(root, 'var', 'GIT_COMMITTER_IDENT');
       this.repositories.push({ path: root, branch, remote, remoteRef, upstream, head: (await this.git(root, 'rev-parse', 'HEAD')).trim() });
@@ -104,21 +121,40 @@ export class GitSync {
     return JSON.stringify({ entries, index });
   }
   private async merge(repo: Repository, phase: string, verify?: () => Promise<void>, target = repo.upstream) {
-    await this.identity(repo);
-    if ((await this.changed(repo.path)).length) throw new Error(`Git checkout became dirty during synchronization: ${repo.path}`);
-    const counts = (await this.git(repo.path, 'rev-list', '--left-right', '--count', `HEAD...${target}`)).trim().split(/\s+/).map(Number);
-    if (!counts[1]) return false;
+    await this.requireClean(repo, 'during synchronization');
+    let targetHead: string, counts: number[];
+    try {
+      targetHead = (await this.git(repo.path, 'rev-parse', '--verify', `${target}^{commit}`)).trim();
+      counts = (await this.git(repo.path, 'rev-list', '--left-right', '--count', `HEAD...${targetHead}`)).trim().split(/\s+/).map(Number);
+    } catch (error) { return await this.skipSync(repo.path, phase, error); }
+    if (!counts[1]) return;
     if (!counts[0]) {
-      await this.git(repo.path, 'merge', '--ff-only', '--', target);
+      try { await this.git(repo.path, 'merge', '--ff-only', '--no-autostash', '--no-overwrite-ignore', '--', targetHead); }
+      catch (error) {
+        await this.requireClean(repo, 'after a failed fast-forward');
+        return await this.skipSync(repo.path, phase, error);
+      }
       repo.head = (await this.git(repo.path, 'rev-parse', 'HEAD')).trim();
       await verify?.();
-      this.event('fast_forward', repo.path, { phase, target, head: repo.head }); return true;
+      this.event('fast_forward', repo.path, { phase, target, head: repo.head }); return;
     }
-    try { await this.git(repo.path, 'merge', '--no-ff', '--no-commit', '--', target); }
+    try { await this.git(repo.path, 'merge', '--no-ff', '--no-commit', '--no-autostash', '--no-overwrite-ignore', '--', targetHead); }
     catch (error) {
       const files = split(await this.git(repo.path, 'diff', '--name-only', '--diff-filter=U', '-z'));
-      if (!files.length) throw error;
+      if (!files.length) {
+        await this.requireClean(repo, 'after a failed merge');
+        return await this.skipSync(repo.path, phase, error);
+      }
       this.event('conflict', repo.path, { phase, target, files });
+      if (this.conflictPolicy === 'skip' && !this.resolver) {
+        const mergeHead = (await this.git(repo.path, 'rev-parse', 'MERGE_HEAD')).trim();
+        if (mergeHead !== targetHead) throw error;
+        await this.identity(repo);
+        await this.git(repo.path, 'merge', '--abort');
+        await this.requireClean(repo, 'after conflict cleanup');
+        await this.skipSync(repo.path, phase, new Error(`Git conflict with ${target}; restored the pre-merge checkout`));
+        return;
+      }
       if (!this.resolver) throw new Error(`Git conflicts in ${repo.path}; reconcile the preserved merge manually. Enable --git-conflicts worker before starting a future clean run for automatic resolution`);
       const mergeHead = (await this.git(repo.path, 'rev-parse', 'MERGE_HEAD')).trim();
       const outside = await this.outside(repo, files);
@@ -140,21 +176,25 @@ export class GitSync {
     await verify?.();
     await this.git(repo.path, 'commit', '-m', target === repo.upstream ? 'Merge upstream changes for the next task' : `Merge ${this.integrationBranch} for the next task`);
     repo.head = (await this.git(repo.path, 'rev-parse', 'HEAD')).trim();
-    this.event('merge', repo.path, { phase, target, head: repo.head }); return true;
+    this.event('merge', repo.path, { phase, target, head: repo.head });
   }
   async before(round: number) {
     // Preflight all checkouts before changing any of them.
-    for (const repo of this.repositories) {
-      await this.identity(repo); await this.operation(repo.path);
-      if ((await this.changed(repo.path)).length) throw new Error(`Git checkout became dirty between rounds: ${repo.path}`);
-      if (this.integrationBranch) await this.git(repo.path, 'show-ref', '--verify', `refs/heads/${this.integrationBranch}`);
+    for (const repo of this.repositories) await this.requireClean(repo, 'between rounds');
+    if (this.warning) return;
+    if (this.integrationBranch) for (const repo of this.repositories) {
+      try { await this.git(repo.path, 'show-ref', '--verify', `refs/heads/${this.integrationBranch}`); }
+      catch (error) { return await this.skipSync(repo.path, 'find integration branch', error); }
     }
     for (const repo of this.repositories) {
       if (this.syncUpstream) {
-        await this.git(repo.path, 'fetch', '--no-tags', '--', repo.remote);
+        try { await this.git(repo.path, 'fetch', '--no-tags', '--', repo.remote); }
+        catch (error) { return await this.skipSync(repo.path, `fetch before round ${round}`, error); }
         await this.merge(repo, `before round ${round}`);
+        if (this.warning) return;
       }
       if (this.integrationBranch) await this.merge(repo, `integration before round ${round}`, undefined, `refs/heads/${this.integrationBranch}`);
+      if (this.warning) return;
       this.event('ready', repo.path, { round, head: repo.head });
     }
   }
@@ -175,20 +215,34 @@ export class GitSync {
           this.event('commit', repo.path, { round, task_id: id, head: repo.head, files });
         }
       }
-      if (!this.syncUpstream) {
-        if ((await this.changed(repo.path)).length) throw new Error(`Uncommitted changes remain after local checkpoint in ${repo.path}`);
-        this.event('checkpointed', repo.path, { round, head: repo.head }); continue;
-      }
-      const upstream = (await this.git(repo.path, 'rev-parse', repo.upstream)).trim();
+      if ((await this.changed(repo.path)).length) throw new Error(`Uncommitted changes remain after local checkpoint in ${repo.path}`);
+      this.event('checkpointed', repo.path, { round, head: repo.head });
+    }
+    if (!this.syncUpstream || this.warning) return 'committed';
+    for (const repo of this.repositories) {
+      let upstream: string;
+      try { upstream = (await this.git(repo.path, 'rev-parse', repo.upstream)).trim(); }
+      catch (error) { await this.skipSync(repo.path, `publish round ${round}`, error); return 'committed'; }
       try { await this.git(repo.path, 'push', '--', repo.remote, `HEAD:${repo.remoteRef}`); }
       catch (error) {
-        await this.git(repo.path, 'fetch', '--no-tags', '--', repo.remote);
-        if ((await this.git(repo.path, 'rev-parse', repo.upstream)).trim() === upstream) throw error;
+        try {
+          await this.git(repo.path, 'fetch', '--no-tags', '--', repo.remote);
+          if ((await this.git(repo.path, 'rev-parse', repo.upstream)).trim() === upstream) throw error;
+        } catch (retryError) {
+          await this.requireClean(repo, 'after a failed push');
+          await this.skipSync(repo.path, `publish round ${round}`, retryError); return 'committed';
+        }
         await this.merge(repo, `publish round ${round}`, verify);
-        await this.git(repo.path, 'push', '--', repo.remote, `HEAD:${repo.remoteRef}`);
+        if (this.warning) return 'committed';
+        try { await this.git(repo.path, 'push', '--', repo.remote, `HEAD:${repo.remoteRef}`); }
+        catch (retryError) {
+          await this.requireClean(repo, 'after a failed push retry');
+          await this.skipSync(repo.path, `retry publish round ${round}`, retryError); return 'committed';
+        }
       }
       if ((await this.changed(repo.path)).length) throw new Error(`Uncommitted changes remain after Git sync in ${repo.path}`);
       this.event('pushed', repo.path, { round, head: repo.head });
     }
+    return 'pushed';
   }
 }

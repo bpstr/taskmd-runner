@@ -35,6 +35,14 @@ function conflicting(repo, peer) {
   fs.writeFileSync(path.join(peer, 'shared.txt'), 'remote\n'); commit(peer, 'Keep remote feature'); git(peer, 'push');
 }
 function sync(repo, dir, resolver) { return new GitSync(repo, [], [dir], dir, undefined, resolver); }
+function assertSyncWarning(result, phase) {
+  const warnings = result.stderr.split('\n').filter(line => line.includes('"event":"git_sync_warning"')).map(line => JSON.parse(line));
+  assert.equal(warnings.length, 1);
+  assert.equal(warnings[0].requires_attention, true);
+  assert.match(warnings[0].phase, phase);
+  assert.equal(result.summary.git_sync.warning.phase, warnings[0].phase);
+  assert.equal(result.summary.git_sync.events.filter(event => event.event === 'sync_skipped').length, 1);
+}
 function tasks(root, count = 1) {
   fs.mkdirSync(path.join(root, 'tasks'), { recursive: true });
   fs.writeFileSync(path.join(root, '.taskmd.yaml'), 'dir: tasks\n');
@@ -62,6 +70,8 @@ test('Git CLI options require explicit sync and preserve worker argv', () => {
   for (const flags of [['--git-repo', 'core'], ['--git-conflicts', 'worker'], ['--git-sync', '--git-conflicts', 'unknown']]) assert.throws(() => parseArgs(['--project', '/tmp', ...flags]));
   const local = parseArgs(['--project', '/tmp', '--git-integration-branch', 'main', '--git-repo', 'core', '--git-conflicts', 'worker']);
   assert.equal(local.gitIntegrationBranch, 'main'); assert.equal(local.gitSync, false);
+  assert.equal(local.gitConflicts, 'worker');
+  assert.equal(parseArgs(['--project', '/tmp', '--git-sync']).gitConflicts, 'skip');
   assert.throws(() => parseArgs(['--project', '/tmp', '--git-integration-branch', '']), /nonempty/);
 });
 test('local worktree integration merges main before every task without a remote', async t => {
@@ -87,7 +97,7 @@ test('local worktree integration merges main before every task without a remote'
   assert.ok(state.events.some(event => event.event === 'merge' && event.target === 'refs/heads/main' && event.phase === 'integration before round 2'));
   assert.equal(readTask(path.join(repo, 'tasks/api/001-task.md')).meta.status, 'pending');
 });
-for (const mode of ['missing', 'conflict']) test(`local integration ${mode} stops before a task claim`, async t => {
+for (const mode of ['missing', 'conflict']) test(`local integration ${mode} warns and allows a local checkpoint`, async t => {
   const base = temporary(t), { repo } = repository(base); tasks(repo); commit(repo);
   git(repo, 'switch', '-c', 'lane/api');
   if (mode === 'conflict') {
@@ -96,10 +106,11 @@ for (const mode of ['missing', 'conflict']) test(`local integration ${mode} stop
     git(repo, 'switch', 'lane/api');
   }
   const result = await run(repo, ['--git-integration-branch', mode === 'missing' ? 'missing' : 'main'], {}, undefined, false);
-  assert.equal(result.code, 1, result.stderr); assert.equal(result.summary.reason, 'git_sync_error');
-  assert.equal(result.summary.rounds.length, 0);
-  assert.equal(readTask(path.join(repo, 'tasks/001-task.md')).meta.status, 'pending');
-  assert.equal(fs.existsSync(path.join(repo, '.git/MERGE_HEAD')), mode === 'conflict');
+  assert.equal(result.code, 0, result.stderr);
+  assertSyncWarning(result, mode === 'missing' ? /find integration branch/ : /integration before round 1/);
+  assert.equal(result.summary.rounds[0].git_sync, 'committed');
+  assert.match(git(repo, 'show', 'HEAD:tasks/001-task.md'), /status: completed/);
+  assert.equal(fs.existsSync(path.join(repo, '.git/MERGE_HEAD')), false);
 });
 test('local integration and upstream sync merge independently and publish only the lane branch', async t => {
   const base = temporary(t), { repo, peer, remote } = repository(base);
@@ -135,18 +146,49 @@ test('fetches upstream before each boundary and publishes completed changes', as
   }
   assert.equal(controller.events.filter(x => x.event === 'fast_forward').length, 2);
 });
-test('rejects dirty, detached, missing-upstream and unfinished checkouts before sync', async t => {
+test('rejects dirty, detached and unfinished checkouts before sync', async t => {
   const base = temporary(t), { repo } = repository(base);
   fs.writeFileSync(path.join(repo, 'unknown.txt'), 'unrelated');
   await assert.rejects(sync(repo, path.join(base, 'a')).initialize(), /clean checkout/); fs.unlinkSync(path.join(repo, 'unknown.txt'));
   git(repo, 'checkout', '--detach'); await assert.rejects(sync(repo, path.join(base, 'b')).initialize(), /not a symbolic ref/); git(repo, 'checkout', 'main');
-  git(repo, 'branch', '--unset-upstream'); await assert.rejects(sync(repo, path.join(base, 'c')).initialize(), /upstream/);
-  git(repo, 'branch', '--set-upstream-to=origin/main'); fs.writeFileSync(path.join(repo, '.git/CHERRY_PICK_HEAD'), git(repo, 'rev-parse', 'HEAD'));
+  fs.writeFileSync(path.join(repo, '.git/CHERRY_PICK_HEAD'), git(repo, 'rev-parse', 'HEAD'));
   await assert.rejects(sync(repo, path.join(base, 'd')).initialize(), /Unfinished Git operation/);
 });
-test('preserves a conflicting merge and stops before claiming a task by default', async t => {
+for (const mode of ['missing upstream', 'unavailable remote']) test(`${mode} warns and allows local work`, async t => {
+  const base = temporary(t), { repo, remote } = repository(base); tasks(repo, 2); commit(repo); git(repo, 'push');
+  if (mode === 'missing upstream') git(repo, 'branch', '--unset-upstream');
+  else git(repo, 'remote', 'set-url', 'origin', path.join(base, 'offline.git'));
+  const result = await run(repo);
+  assert.equal(result.code, 0, result.stderr);
+  assertSyncWarning(result, mode === 'missing upstream' ? /configure upstream/ : /fetch before round 1/);
+  assert.deepEqual(result.summary.rounds.map(row => row.git_sync), ['committed', 'committed']);
+  assert.match(git(repo, 'show', 'HEAD:tasks/002-task.md'), /status: completed/);
+  assert.match(git(remote, 'show', 'main:tasks/002-task.md'), /status: pending/);
+});
+test('restores the clean checkout after a conflict and continues local work by default', async t => {
+  const base = temporary(t), { repo, peer, remote } = repository(base); tasks(repo, 2); commit(repo); git(repo, 'push'); conflicting(repo, peer);
+  const result = await run(repo);
+  assert.equal(result.code, 0, result.stderr);
+  assertSyncWarning(result, /before round 1/);
+  assert.deepEqual(result.summary.rounds.map(row => row.git_sync), ['committed', 'committed']);
+  assert.equal(git(repo, 'show', 'HEAD:shared.txt'), 'local');
+  assert.equal(git(remote, 'show', 'main:shared.txt'), 'remote');
+  assert.equal(fs.existsSync(path.join(repo, '.git/MERGE_HEAD')), false);
+});
+test('skips an update that would overwrite an ignored local file', async t => {
+  const base = temporary(t), { repo, peer } = repository(base); tasks(repo); commit(repo); git(repo, 'push'); git(peer, 'pull', '--ff-only');
+  fs.appendFileSync(path.join(repo, '.git/info/exclude'), '\nlocal.txt\n');
+  fs.writeFileSync(path.join(repo, 'local.txt'), 'keep local data\n');
+  fs.writeFileSync(path.join(peer, 'local.txt'), 'upstream data\n'); commit(peer); git(peer, 'push');
+  const result = await run(repo);
+  assert.equal(result.code, 0, result.stderr);
+  assertSyncWarning(result, /before round 1/);
+  assert.equal(fs.readFileSync(path.join(repo, 'local.txt'), 'utf8'), 'keep local data\n');
+  assert.equal(result.summary.rounds[0].git_sync, 'committed');
+});
+test('explicit stop mode preserves a conflicting merge before claiming a task', async t => {
   const base = temporary(t), { repo, peer } = repository(base); tasks(repo); commit(repo); git(repo, 'push'); conflicting(repo, peer);
-  const r = await run(repo); assert.equal(r.code, 1, r.stderr); assert.equal(r.summary.reason, 'git_sync_error'); assert.equal(r.summary.rounds.length, 0);
+  const r = await run(repo, ['--git-conflicts', 'stop']); assert.equal(r.code, 1, r.stderr); assert.equal(r.summary.reason, 'git_sync_error'); assert.equal(r.summary.rounds.length, 0);
   assert.equal(readTask(path.join(repo, 'tasks/001-task.md')).meta.status, 'pending'); assert.ok(fs.existsSync(path.join(repo, '.git/MERGE_HEAD')));
 });
 for (const adapter of [undefined, 'grok', 'codex', 'claude']) test(`dedicated ${adapter || 'custom'} resolver reconciles conflicts before the capped task`, async t => {
@@ -163,14 +205,22 @@ for (const mode of ['blocked', 'unsafe', 'markers', 'index', 'malformed']) test(
   assert.equal(r.code, 1, r.stderr); assert.equal(r.summary.reason, 'git_sync_error'); assert.equal(r.summary.rounds.length, 0);
   assert.ok(fs.existsSync(path.join(repo, '.git/MERGE_HEAD'))); assert.equal(readTask(path.join(repo, 'tasks/001-task.md')).meta.status, 'pending');
 });
-test('multi-repository workspace commits source and task state in their owning repositories', async t => {
+for (const rejectPush of [false, true]) test(`multi-repository workspace checkpoints both repositories${rejectPush ? ' after the first push is rejected' : ' and publishes them'}`, async t => {
   const base = temporary(t), work = path.join(base, 'workspace'); fs.mkdirSync(work); tasks(work, 2);
   const code = repository(base, 'code'), taskRepo = path.join(work, 'tasks'); git(taskRepo, 'init', '-b', 'main'); configure(taskRepo); commit(taskRepo);
   const taskRemote = path.join(base, 'tasks.git'); git(base, 'init', '--bare', '--initial-branch=main', taskRemote); git(taskRepo, 'remote', 'add', 'origin', taskRemote); git(taskRepo, 'push', '-u', 'origin', 'main');
+  if (rejectPush) fs.writeFileSync(path.join(code.remote, 'hooks/pre-receive'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
   const r = await run(work, ['--rounds', '2', '--git-repo', code.repo, '--git-repo', taskRepo], { PREPARED_GIT_REPOS: JSON.stringify([code.repo]) });
   assert.equal(r.code, 0, r.stderr + JSON.stringify(r.summary)); assert.equal(r.summary.rounds.length, 2);
-  assert.equal(git(code.remote, 'show', 'main:finished.txt'), 'Prepared task 002-task.md');
-  assert.match(git(taskRemote, 'show', 'main:002-task.md'), /status: completed/);
+  assert.equal(git(code.repo, 'show', 'HEAD:finished.txt'), 'Prepared task 002-task.md');
+  assert.match(git(taskRepo, 'show', 'HEAD:002-task.md'), /status: completed/);
+  if (rejectPush) {
+    assertSyncWarning(r, /publish round 1/);
+    assert.match(git(taskRemote, 'show', 'main:002-task.md'), /status: pending/);
+  } else {
+    assert.equal(git(code.remote, 'show', 'main:finished.txt'), 'Prepared task 002-task.md');
+    assert.match(git(taskRemote, 'show', 'main:002-task.md'), /status: completed/);
+  }
 });
 for (const previousRuns of [2, 3]) {
   test(`task run limits publish a blocked handoff with ${previousRuns} prior runs and continue`, async t => {
@@ -195,7 +245,10 @@ for (const mode of ['pending-first', 'exit-first', 'unrepairable-first', 'scope-
     const r = await run(repo, [], { PREPARED_GIT_MODE: mode, PREPARED_GIT_REPOS: JSON.stringify([repo]) });
     assert.equal(r.code, 2, r.stderr); assert.equal(r.summary.reason, 'no_ready_tasks');
     const attempts = ['pending-first', 'exit-first'].includes(mode) ? 3 : mode === 'unrepairable-first' ? 2 : 1;
-    assert.deepEqual(r.summary.rounds.map(row => row.task_id), [...Array(attempts).fill('001'), '002']);
+    const expected = ['pending-first', 'exit-first'].includes(mode)
+      ? ['001', '002', ...Array(attempts - 1).fill('001')]
+      : [...Array(attempts).fill('001'), '002'];
+    assert.deepEqual(r.summary.rounds.map(row => row.task_id), expected);
     assert.match(git(remote, 'show', 'main:tasks/001-task.md'), /status: blocked/);
     assert.match(git(remote, 'show', 'main:tasks/002-task.md'), /status: completed/);
     assert.doesNotMatch(git(remote, 'show', 'main:tasks/001-task.md'), /# Changed scope/);
@@ -205,13 +258,18 @@ for (const mode of ['pending-first', 'exit-first', 'unrepairable-first', 'scope-
     assert.equal(git(remote, 'rev-parse', 'main'), git(repo, 'rev-parse', 'HEAD'));
   });
 }
-test('push rejection preserves completed task and local commit and stops the next worker', async t => {
+test('push rejection warns once and later tasks still commit locally', async t => {
   const base = temporary(t), { repo, remote } = repository(base); tasks(repo, 2); commit(repo); git(repo, 'push');
   fs.writeFileSync(path.join(remote, 'hooks/pre-receive'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
   const r = await run(repo, [], { PREPARED_GIT_REPOS: JSON.stringify([repo]) });
-  assert.equal(r.code, 1); assert.equal(r.summary.reason, 'git_sync_error'); assert.equal(r.summary.rounds.length, 1);
-  assert.equal(r.summary.rounds[0].status, 'completed'); assert.equal(readTask(path.join(repo, 'tasks/001-task.md')).meta.status, 'completed');
-  assert.equal(readTask(path.join(repo, 'tasks/002-task.md')).meta.status, 'pending'); assert.notEqual(git(repo, 'rev-parse', 'HEAD'), git(remote, 'rev-parse', 'main'));
+  assert.equal(r.code, 0, r.stderr); assert.equal(r.summary.reason, 'empty');
+  assertSyncWarning(r, /publish round 1/);
+  assert.deepEqual(r.summary.rounds.map(row => row.git_sync), ['committed', 'committed']);
+  for (const id of ['001', '002']) {
+    assert.match(git(repo, 'show', `HEAD:tasks/${id}-task.md`), /status: completed/);
+    assert.match(git(remote, 'show', `main:tasks/${id}-task.md`), /status: pending/);
+  }
+  assert.equal(git(repo, 'status', '--porcelain', '--untracked-files=no'), '');
 });
 test('one push race fetches and merges the new upstream before a bounded retry', async t => {
   const base = temporary(t), { repo, peer, remote } = repository(base), controller = sync(repo, path.join(base, 'evidence')); await controller.initialize(); await controller.before(1);
@@ -249,6 +307,16 @@ test('a publication conflict is resolved once and verified before the merged res
   fs.writeFileSync(path.join(repo, 'shared.txt'), 'local completed\n'); fs.writeFileSync(path.join(peer, 'shared.txt'), 'remote\n'); commit(peer); git(peer, 'push');
   await controller.after(1, '001', 'completed', async () => { verified++; });
   assert.equal(resolved, 1); assert.equal(verified, 1); assert.equal(git(remote, 'show', 'main:shared.txt'), 'both sides');
+});
+test('skipping a publication conflict keeps the accepted handoff committed', async t => {
+  const base = temporary(t), { repo, peer, remote } = repository(base); tasks(repo); commit(repo); git(repo, 'push'); git(peer, 'pull', '--ff-only');
+  const r = await run(repo, ['--rounds', '1'], { PREPARED_GIT_ADVANCE_PEER: peer });
+  assert.equal(r.code, 0, r.stderr);
+  assertSyncWarning(r, /publish round 1/);
+  assert.equal(r.summary.rounds[0].git_sync, 'committed');
+  assert.match(git(repo, 'show', 'HEAD:tasks/001-task.md'), /status: completed/);
+  assert.match(git(remote, 'show', 'main:tasks/001-task.md'), /Concurrent prepared note/);
+  assert.equal(fs.existsSync(path.join(repo, '.git/MERGE_HEAD')), false);
 });
 test('publication resolution cannot discard the accepted task handoff', async t => {
   const base = temporary(t), { repo, peer, remote } = repository(base); tasks(repo); commit(repo); git(repo, 'push'); git(peer, 'pull', '--ff-only');
