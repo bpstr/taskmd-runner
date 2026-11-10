@@ -2,7 +2,7 @@
 
 A sequential taskmd loop: select pending work, claim it, run one coding worker,
 validate the result, update the task Markdown and repeat. It exits when the selected
-queue has no ready work. It never polls an empty queue or retries failed workers.
+queue has no ready work. It never polls an empty queue.
 
 Requires Node.js 20+, taskmd 0.8.0 and a configured coding-agent CLI. Supports
 Codex, Claude, Gemini, Grok, Kimi and Muse through the public
@@ -51,6 +51,20 @@ not reconstructed. Preserve the counter when editing handoffs. A blocked task
 requires owner review before explicitly returning it to pending; raise both
 thresholds above its retained count to grant more runs. An already exhausted
 pending task is blocked before another worker starts.
+
+Use `--review-blockers` (MCP `runner_start.review_blockers`) to review a
+worker-reported blocker once before publishing it. The runner starts a fresh
+worker with the earlier handoff, the same task, and the time remaining in the
+original round. The reviewer can continue authorized work or confirm the
+blocker. Both dispatches retain separate evidence under the same round and
+share one charged task run. A custom worker sees `TASKMD_BLOCKER_REVIEW=1`
+during the review dispatch and uses the same result schema.
+
+Review is off by default. It applies to worker-reported blocks with time and
+run budget remaining. Tasks already blocked, invalid-response clarifications
+and worker failures follow their existing paths. Genuine approval and contract
+decisions stay with their owners. Review cannot change task scope, dependency
+gates, Git ownership or the completion checks.
 
 Use repeatable `--task-prefix` options to select task-directory subtrees, for example
 `--task-prefix api --task-prefix astro`. Prefixes are alternatives; normal taskmd

@@ -22,6 +22,7 @@ const startSchema = z.object({
   timeout: z.number().int().positive().optional(),
   max_task_runs: z.number().int().positive().optional(),
   block_after_runs: z.number().int().positive().optional(),
+  review_blockers: z.boolean().optional().describe('Review a worker-reported blocker within the current round before publishing it'),
   model: z.string().optional(), effort: z.string().optional(),
   config: z.string().optional(), task_dir: z.string().optional(), state_dir: z.string().optional(),
   taskmd: z.string().optional(), executable: z.string().optional(),
@@ -81,6 +82,7 @@ export function createRunnerMcp(self = false) {
       for (const [key, flag] of [['filters', '--filter'], ['task_prefixes', '--task-prefix'], ['git_repos', '--git-repo']] as const)
         for (const value of input[key] || []) args.push(flag, value);
       if (input.git_sync) args.push('--git-sync');
+      if (input.review_blockers) args.push('--review-blockers');
       if (input.worker) args.push('--worker', ...input.worker);
       return launchRun(input.project, input.lane, args);
     }));

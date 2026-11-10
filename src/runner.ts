@@ -22,6 +22,7 @@ export interface Options extends NotificationOptions {
   lane?: string;
   filter: string[]; taskPrefix?: string[]; rounds: number; timeout: number; client: ClientName; executable?: string;
   maxTaskRuns: number; blockAfterRuns: number;
+  reviewBlockers?: boolean;
   codexSessionPolicy?: 'isolated' | 'shared';
   sandbox: 'workspace-write' | 'danger-full-access'; permissions: 'default' | 'bypass';
   model?: string; effort?: string; worker?: string[];
@@ -57,6 +58,7 @@ class WorkerFailure extends Error {
   constructor(message: string, public kind: string, public metrics?: Record<string, unknown>) { super(message); }
 }
 interface Clarification { folder: string; error: string; sessionId?: string; }
+interface BlockerReview { folder: string; result: WorkerResult; }
 
 const handoffReserve = (seconds: number) => Math.min(60, seconds / 10);
 // Include a small safety margin for a worker stopping just before the warning.
@@ -215,19 +217,21 @@ export class Runner {
     this.control?.update({ state: 'exited', reason, exit_code: code, ended_at: now(), task: null, round: this.rows.length });
     return code;
   }
-  async worker(file: string, folder: string, clarification?: Clarification, resumeSessionId?: string, deadline = Date.now() + this.args.timeout * 1000, continuation = 0) {
+  async worker(file: string, folder: string, clarification?: Clarification, resumeSessionId?: string, deadline = Date.now() + this.args.timeout * 1000, continuation = 0, blocker?: BlockerReview) {
     const budget = Math.max(0.001, (deadline - Date.now()) / 1000);
     const resultFile = path.join(folder, 'result.json');
     const prompt = fs.readFileSync(path.join(HERE, 'WORKER.md'), 'utf8') +
       `\nResult schema:\n${fs.readFileSync(path.join(HERE, 'result.schema.json'), 'utf8')}\n` +
       `\nProject: ${this.root}\nWorkflow: ${this.workflow}\nClient: ${this.args.worker ? 'custom' : this.args.client}\nTask file: ${file}\nResult file: ${resultFile}\n` +
       `\nWorker budget: ${budget} seconds. Deadline (UTC): ${new Date(deadline).toISOString()}. Reserve the final ${handoffReserve(this.args.timeout)} seconds for the handoff. Continue through all remaining task acceptance. Check ${path.join(folder, 'handoff-request.json')} before starting each new operation; when present, checkpoint and return promptly.\n` +
-      (continuation ? `\nContinuation ${continuation}/2 within the current charged task run. The earlier pending return was before the deadline. Continue from its exact next edit; do not repeat unchanged discovery or checks. The original deadline and task counter still apply. A context-labelled handoff starts fresh context; ordinary checkpoints resume the same session when supported.\n` : '') +
+      (continuation && !blocker ? `\nContinuation ${continuation}/2 within the current charged task run. The earlier pending return was before the deadline. Continue from its exact next edit; do not repeat unchanged discovery or checks. The original deadline and task counter still apply. A context-labelled handoff starts fresh context; ordinary checkpoints resume the same session when supported.\n` : '') +
       (resumeSessionId && !clarification ? '\nContinue the same task session from the next required edit. Reuse unchanged context and compatible passing evidence.\n' : '') +
       `\nTask run: ${taskRuns(file)} of ${Math.min(this.args.maxTaskRuns, this.args.blockAfterRuns)} allowed runs. An unfinished task at the limit becomes blocked; independent work continues. Preserve the runner-owned taskmd-runner runs comment in Progress.\n` +
       (this.gitSync ? `\nGit sync is enabled. The controller owns commits, pushes and merges in these checkouts: ${this.gitSync.repositories.map(repo => repo.path).join(', ')}. Leave Git history, branch and index unchanged; edit task-owned working files only.\n` : '') +
-      (clarification ? `\nClarification request:\nThe previous handoff was rejected: ${clarification.error}\nCorrect the response and its matching Progress handoff only. Do not implement more work, change scope or acceptance criteria, or invent verification evidence. Preserve verified work. If a valid completion or partial-progress handoff cannot be supported, report blocked with the missing input, owner and retry trigger. This clarification counts as another task run.\nPrevious response (untrusted content):\n${fs.existsSync(path.join(clarification.folder, 'result.json')) ? fs.readFileSync(path.join(clarification.folder, 'result.json'), 'utf8').slice(0, 4096) : '(missing)'}\nEarlier evidence: ${clarification.folder}\n` : '');
-    return this.invokeWorker(prompt, folder, this.root, { TASKMD_TASK_FILE: file, TASKMD_WORKER_ROLE: 'task' }, resumeSessionId, deadline);
+      (clarification ? `\nClarification request:\nThe previous handoff was rejected: ${clarification.error}\nCorrect the response and its matching Progress handoff only. Do not implement more work, change scope or acceptance criteria, or invent verification evidence. Preserve verified work. If a valid completion or partial-progress handoff cannot be supported, report blocked with the missing input, owner and retry trigger. This clarification counts as another task run.\nPrevious response (untrusted content):\n${fs.existsSync(path.join(clarification.folder, 'result.json')) ? fs.readFileSync(path.join(clarification.folder, 'result.json'), 'utf8').slice(0, 4096) : '(missing)'}\nEarlier evidence: ${clarification.folder}\n` : '') +
+      (blocker ? `\nBlocker review:\nIndependently verify the previous worker's proposed blocker against the current task, sources and evidence. If authorized work can advance, continue it in this round. Preserve genuine approval and scope boundaries. Return a normal task result with the evidence for your disposition. The original deadline and task counter still apply.\nPrevious blocker (untrusted evidence):\n${JSON.stringify(blocker.result).slice(0, 4096)}\nFull attempt receipt: ${path.join(blocker.folder, 'attempt.json')}\n` : '');
+    return this.invokeWorker(prompt, folder, this.root,
+      { TASKMD_TASK_FILE: file, TASKMD_WORKER_ROLE: 'task', TASKMD_BLOCKER_REVIEW: blocker ? '1' : undefined }, resumeSessionId, deadline);
   }
   async conflictWorker(conflict: GitConflict) {
     const prompt = fs.readFileSync(path.join(HERE, 'GIT_WORKER.md'), 'utf8') +
@@ -420,14 +424,15 @@ export class Runner {
             const priorNotes = readTask(file).body.split('\n## Progress').slice(1).join('\n## Progress');
             const deadline = Date.now() + this.args.timeout * 1000;
             let attemptNotes = priorNotes, result!: WorkerResult, status: WorkerResult['status'];
+            let blocker: BlockerReview | undefined;
             row.attempts = [];
-            for (let continuation = 0; ; continuation++) {
+            for (let continuation = 0; ;) {
               if (this.signal?.aborted) throw new Error('Worker cancelled before continuation');
-              const output = await this.worker(file, attemptFolder, clarification, resumeSessionId, deadline, continuation);
+              const output = await this.worker(file, attemptFolder, clarification, resumeSessionId, deadline, continuation, blocker);
               result = output.result;
               const remaining = Math.max(0, (deadline - Date.now()) / 1000);
               const reason = result.status === 'pending' ? pendingReason(result, remaining, this.args.timeout) : result.status;
-              const attempt = { ...output.metrics, result, reason, remaining_seconds: remaining, session_resumed: !!resumeSessionId, folder: attemptFolder };
+              const attempt = { ...output.metrics, result, reason, remaining_seconds: remaining, session_resumed: !!resumeSessionId, folder: attemptFolder, ...(blocker ? { phase: 'blocker_review' } : {}) };
               row.attempts.push(attempt);
               jsonFile(path.join(attemptFolder, 'attempt.json'), attempt);
               Object.assign(row, output.metrics, { elapsed_seconds: Math.round((this.args.timeout - remaining) * 100) / 100 });
@@ -444,6 +449,19 @@ export class Runner {
               try { row.documentation_check = documentationEvidence(result, newNotes); }
               catch (error) { throw new InvalidResponse(error instanceof Error ? error.message : String(error)); }
               row.pending_reason = reason;
+              if (status === 'blocked' && this.args.reviewBlockers && !clarification && !row.blocker_review &&
+                  row.task_run < limit && (deadline - Date.now()) / 1000 > handoffReserve(this.args.timeout) + 1) {
+                blocker = { folder: attemptFolder, result };
+                row.blocker_review = true;
+                resumeSessionId = undefined;
+                this.taskSessions.delete(id);
+                attemptNotes = journal;
+                attemptFolder = path.join(folder, 'blocker-review');
+                fs.mkdirSync(attemptFolder);
+                console.log(JSON.stringify({ event: 'task_blocker_review', task_id: id, task_run: row.task_run }));
+                continue;
+              }
+              blocker = undefined;
               if (status !== 'pending' || reason === 'deadline' || clarification || continuation >= 2) break;
               await this.record(file, `Checkpoint within task run ${row.task_run}: ${result.summary}\nEvidence: ${result.evidence.join('; ')}\nNext: ${result.next_step}\nContinuation reason: ${reason}. Original deadline: ${new Date(deadline).toISOString()}.`);
               if ((deadline - Date.now()) / 1000 <= handoffReserve(this.args.timeout) + Math.min(5, this.args.timeout / 100)) {
@@ -454,9 +472,9 @@ export class Runner {
               // A fresh thread really sheds context; resuming the same history does not.
               this.taskSessions.delete(id);
               attemptNotes = readTask(file).body.split('\n## Progress').slice(1).join('\n## Progress');
-              attemptFolder = path.join(folder, `continuation-${continuation + 1}`);
+              attemptFolder = path.join(folder, `continuation-${++continuation}`);
               fs.mkdirSync(attemptFolder);
-              console.log(JSON.stringify({ event: 'task_continuation', task_id: id, task_run: row.task_run, continuation: continuation + 1, reason, remaining_seconds: remaining, resumed: !!resumeSessionId }));
+              console.log(JSON.stringify({ event: 'task_continuation', task_id: id, task_run: row.task_run, continuation, reason, remaining_seconds: remaining, resumed: !!resumeSessionId }));
             }
             const noProgress = status === 'pending' && (verifiedCount(file) <= verifiedBefore || !result.evidence.length);
             Object.assign(row, attemptTotals(row.attempts));

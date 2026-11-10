@@ -231,6 +231,53 @@ test('blocked task permits independent work and leaves unfinished exit', async t
   const r = await run(root, 'blocked'); assert.equal(r.code, 2, r.stderr); assert.equal(r.summary.reason, 'no_ready_tasks');
   assert.deepEqual(r.summary.rounds.map(x => x.task_id), ['001', '003']);
   assert.equal(r.events.filter(event => event.event === 'response_clarification').length, 0);
+  assert.ok(!r.events.some(event => event.event === 'task_blocker_review'));
+});
+test('blocker review can complete the same round and release dependent work', async t => {
+  const root = fixture(t), file = task(root, '001'), dependent = task(root, '002', { dependencies: ['001'] });
+  const r = await run(root, 'review-recoverable-first', ['--review-blockers'], true);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(taskRuns(file), 1);
+  assert.equal(readTask(dependent).meta.status, 'completed');
+  assert.deepEqual(r.summary.blocked_tasks, []);
+  assert.deepEqual(r.summary.rounds.map(row => row.task_id), ['001', '002']);
+  const [initial, review] = r.summary.rounds[0].attempts;
+  assert.equal(initial.result.status, 'blocked');
+  assert.equal(review.result.status, 'completed');
+  assert.equal(review.phase, 'blocker_review');
+  assert.equal(review.session_resumed, false);
+  assert.ok(fs.existsSync(path.join(initial.folder, 'attempt.json')));
+  assert.ok(fs.existsSync(path.join(review.folder, 'attempt.json')));
+  const reviewRequests = fs.readFileSync(path.join(review.folder, 'rpc.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  assert.ok(reviewRequests.some(request => request.method === 'thread/start'));
+  assert.ok(!reviewRequests.some(request => request.method === 'thread/resume'));
+  const deadline = folder => fs.readFileSync(path.join(folder, 'prompt.md'), 'utf8').match(/Deadline \(UTC\): (\S+)/)?.[1];
+  assert.ok(deadline(initial.folder));
+  assert.equal(deadline(review.folder), deadline(initial.folder));
+});
+test('blocker review confirms a block once and leaves unrelated work runnable', async t => {
+  const root = fixture(t), file = task(root, '001', { priority: 'critical' });
+  const dependent = task(root, '002', { dependencies: ['001'] }), independent = task(root, '003');
+  const r = await run(root, 'blocked-first', ['--review-blockers']);
+  assert.equal(r.code, 2, r.stderr);
+  assert.equal(readTask(file).meta.status, 'blocked');
+  assert.equal(taskRuns(file), 1);
+  assert.equal(readTask(dependent).meta.status, 'pending');
+  assert.equal(readTask(independent).meta.status, 'completed');
+  assert.equal(r.summary.rounds[0].attempts.length, 2);
+  assert.equal(r.events.filter(event => event.event === 'task_blocker_review').length, 1);
+  assert.deepEqual(r.summary.blocked_tasks.map(row => row.task_id), ['001']);
+});
+test('blocker review skips previously blocked tasks and a task at its run limit', async t => {
+  const root = fixture(t), alreadyBlocked = task(root, '001', { status: 'blocked' }), final = task(root, '002');
+  const r = await run(root, 'review-recoverable', ['--review-blockers', '--max-task-runs', '1']);
+  assert.equal(r.code, 2, r.stderr);
+  assert.equal(taskRuns(alreadyBlocked), 0);
+  assert.equal(taskRuns(final), 1);
+  assert.equal(readTask(final).meta.status, 'blocked');
+  assert.deepEqual(r.summary.rounds.map(row => row.task_id), ['002']);
+  assert.equal(r.summary.rounds[0].attempts.length, 1);
+  assert.ok(!r.events.some(event => event.event === 'task_blocker_review'));
 });
 for (const client of ['codex', 'claude', 'grok']) {
   test(`invalid response clarification repairs the handoff with ${client}`, async t => {
