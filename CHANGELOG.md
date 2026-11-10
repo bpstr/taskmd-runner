@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.1 — 2026-11-10
 
 - Add opt-in review of worker-reported blockers within the current task round.
   Preserve its deadline, run counter and task contract, and retain both receipts.

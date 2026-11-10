@@ -1,5 +1,23 @@
 # Runner validation
 
+## 0.4.1 GitHub release
+
+The blocker review changes worker dispatch, handoff validation, and the CLI and
+MCP start options. The focused selector covered blocker review and default
+blocking, checkpoints and context handoffs, continuation failures and
+clarification, cancellation, worker timeout, monitor blocker reporting, version
+metadata, and MCP control. The TypeScript build passed and 21 prepared cases
+passed in 17.3 seconds. All workers used deterministic fixtures.
+
+The release archive installed offline. The package and lockfile report 0.4.1,
+and all 57 archived files matched the release checkout and installation.
+The installed CLI reported 0.4.1 and listed `--review-blockers`. The MCP
+initialize and tools-list exchange reported 0.4.1, the four expected tools and
+the optional Boolean `runner_start.review_blockers` field. The 93,836-byte
+archive has SHA-256
+`3965991c989b05759a2e7d1f9f46c267af75ed921c673f63f8286a58d08a981a`.
+Local evidence is in `.taskmd-runner/release-0.4.1/`.
+
 ## 0.4.0 GitHub release
 
 Release scope: Roadmap Monitor reporting, runner MCP and local lane integration.
