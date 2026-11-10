@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Add opt-in review of worker-reported blockers within the current task round.
+  Preserve its deadline, run counter and task contract, and retain both receipts.
+
 ## 0.4.0 — 2026-11-09
 
 - Merge an explicitly selected local integration branch before each lane task,

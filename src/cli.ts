@@ -16,6 +16,7 @@ Select pending taskmd work, claim it, run one worker, validate and repeat.
   --rounds N             Maximum worker rounds; 0 drains ready work (default 0)
   --max-task-runs N      Maximum runs per task across restarts (default 5)
   --block-after-runs N   Block unfinished tasks after N runs (default 3)
+  --review-blockers     Review a worker blocker once within the current round
   --filter EXPR          Repeatable taskmd filter
   --task-prefix PATH     Allow a task-directory subtree; repeat for alternatives
   --timeout SECONDS      Per-worker timeout (default 7200; 2 hours)
@@ -49,6 +50,7 @@ export function parseArgs(argv: string[]): Options {
     if (flag === '--lane') { options.lane = laneName(argv[++i]); if (argv[i] === undefined) throw new Error('Missing value for --lane'); continue; }
     if (flag === '--worker') { options.worker = argv.slice(i + 1); if (!options.worker.length) throw new Error('--worker must be nonempty'); break; }
     if (flag === '--git-sync') { options.gitSync = true; continue; }
+    if (flag === '--review-blockers') { options.reviewBlockers = true; continue; }
     const value = argv[++i];
     if (value === undefined) throw new Error(`Missing value for ${flag}`);
     if (strings[flag]) Object.assign(options, { [strings[flag]]: value });

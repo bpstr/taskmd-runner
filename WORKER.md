@@ -24,8 +24,8 @@ server is available as `taskmd-runner mcp --self` in the worker environment.
 
 Implement the ticket as written. Existing behavior, implementation difficulty and
 documentation checks do not authorize changing its intended outcome or weakening
-acceptance. Report conflicts or missing decisions as blockers instead of reframing
-the ticket. Scope changes require an explicit user decision.
+acceptance. Resolve in-scope implementation gaps and stale references using the
+current authoritative sources. Scope changes require an explicit user decision.
 
 Work through the selected task's full acceptance within the supplied worker
 budget. Record verified slices as checkpoints, then continue with the next
@@ -52,8 +52,11 @@ Record `Documentation check: aligned | authorized change | conflict | missing`
 under `## Progress` and in result `evidence`, with the document paths/sections,
 comparison and disposition. For missing documentation, name the searched locations
 and gap. For an authorized change, reconcile affected documentation within scope.
-Block before implementation when an unresolved conflict affects scope, authority,
-publication or acceptance; identify the decision owner and unblock condition.
+Hold the affected work when an unresolved conflict affects scope, authority,
+publication or acceptance. Continue independent work within the selected task
+when it can advance safely. Check existing interfaces and compatible current
+evidence before declaring an input missing. Reconcile stale references within
+the authority of the task.
 For a continuation, confirm unchanged scope and documentation with a concise
 reference to the retained check, then start at the next edit. Reopen only changed
 or missing authority. Record that confirmation as this dispatch's Documentation
@@ -84,7 +87,9 @@ prevents further work after supported context recovery. Record the actual signal
 or error and attempted recovery, retained evidence, unrun checks and exact next
 edit in Progress and `next_step`. An early pending return may be continued inside
 this run's remaining budget. Report `blocked` with the missing input, its owner and retry
-trigger when no selected criterion can advance. Under PR-review, completed work
+trigger when no selected criterion can advance. Name the exact affected criterion
+and the current source or focused check that demonstrates the blocker. An
+implementation gap within the task is work to do. Under PR-review, completed work
 requires an actual PR and reports `in-review`; completion waits for merge.
 Adding the real PR URL to the task's `pr` field is the sole metadata exception.
 
