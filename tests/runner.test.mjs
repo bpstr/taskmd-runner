@@ -51,8 +51,13 @@ for (const scenario of [
   { name: 'drained queue', mode: 'completed', options: [], outcome: 'completed', code: 0 },
   { name: 'round cap', mode: 'completed', options: ['--rounds', '1'], outcome: 'needs_attention', code: 0 },
   { name: 'blocked task followed by independent work', mode: 'blocked-first', options: [], outcome: 'needs_attention', code: 2 },
+  { name: 'externally reconciled blocker', mode: 'reconciled-monitor-blocker', options: [], outcome: 'needs_attention', code: 2 },
 ]) test(`monitor reports ${scenario.name} through prepared workers`, async t => {
   const root = fixture(t); task(root, '001', { priority: 'critical' }); task(root, '002');
+  if (scenario.mode === 'reconciled-monitor-blocker') {
+    task(root, '003');
+    task(root, '004');
+  }
   const reports = [], key = `rm_${'a'.repeat(16)}_${'b'.repeat(64)}`;
   const server = createServer(async (req, res) => {
     let body = ''; for await (const chunk of req) body += chunk;
@@ -73,6 +78,14 @@ for (const scenario of [
   assert.ok(final.run.last_progress_at);
   assert.ok(envelopes.some(report => report.activity?.text.includes('Task 001')));
   assert.ok(envelopes.flatMap(report => report.events).some(event => event.type === 'runner.task_result'));
+  if (scenario.mode === 'reconciled-monitor-blocker') {
+    assert.equal(readTask(path.join(root, 'tasks/001-task.md')).meta.status, 'completed');
+    assert.ok(envelopes.some(report => report.attention.some(issue => issue.task_id === '001')));
+    assert.ok(envelopes.some(report => !report.run.terminal && report.run.task_id === '004' &&
+      report.attention.length === 1 && report.attention[0].task_id === '002'));
+    assert.deepEqual(final.attention.map(issue => issue.task_id), ['002']);
+    assert.deepEqual(r.summary.blocked_tasks.map(blocker => blocker.task_id), ['001', '002']);
+  }
   assert.ok(!JSON.stringify(envelopes).includes(root)); assert.ok(!JSON.stringify(envelopes).includes(key));
   if (scenario.mode === 'blocked-first') {
     assert.deepEqual(r.summary.rounds.map(row => row.task_id), ['001', '002']);

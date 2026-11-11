@@ -90,6 +90,7 @@ export class Runner {
   private lockError?: string;
   private configText: string;
   private monitor?: MonitorReporter | null;
+  private monitorBlockers = new Map<string, { taskPath: string; reason: string }>();
   private monitorSequence = 0;
   private control?: RunControl;
   private async controlCheckpoint() {
@@ -167,6 +168,25 @@ export class Runner {
     this.unavailableTasks.set(id, reason);
     console.log(JSON.stringify({ event: 'task_skipped', task_id: id, reason, next_action: 'select_next_task' }));
   }
+  private refreshMonitorAttention() {
+    if (!this.monitor) return;
+    for (const [id, blocker] of this.monitorBlockers) {
+      try {
+        const file = path.join(this.tasks, blocker.taskPath);
+        if (fs.realpathSync(file) !== file) continue;
+        const current = readTask(file).meta;
+        if (String(current.id) === id &&
+            ['pending', 'in-progress', 'in-review', 'completed', 'cancelled'].includes(current.status))
+          this.monitorBlockers.delete(id);
+      } catch {
+        // An unreadable or moved task does not prove that its blocker was resolved.
+      }
+    }
+    this.monitor.record.attentionTasks = [...this.monitorBlockers.keys()];
+    this.monitor.record.attentionReasons = Object.fromEntries(
+      [...this.monitorBlockers].map(([id, blocker]) => [id, blocker.reason]),
+    );
+  }
   private async reportBlocked(row: Record<string, any>, folder?: string) {
     const blocked = { task_id: row.task_id, task_path: row.task_path, task_runs: row.task_run,
       reason: row.blocked_reason || 'worker_blocked', limit: row.task_run_limit,
@@ -174,8 +194,8 @@ export class Runner {
       ...(row.error ? { error: row.error } : {}), ...(folder ? { receipt: path.join(folder, 'receipt.json') } : {}) };
     this.blockedTasks.push(blocked);
     if (this.monitor) {
-      this.monitor.record.attentionTasks = this.blockedTasks.map(task => task.task_id);
-      this.monitor.record.attentionReasons = Object.fromEntries(this.blockedTasks.map(task => [task.task_id, task.reason]));
+      this.monitorBlockers.set(blocked.task_id, { taskPath: blocked.task_path, reason: blocked.reason });
+      this.refreshMonitorAttention();
       this.monitorEvent('runner.blocked', { task: row.task_id, reasonCode: blocked.reason });
     }
     console.log(JSON.stringify({ event: 'task_blocked', ...blocked, next_action: 'select_next_task' }));
@@ -215,6 +235,7 @@ export class Runner {
     jsonFile(path.join(this.runDir, 'summary.json'), { reason, exit_code: code, client: this.args.client, rounds: this.rows, blocked_tasks: this.blockedTasks, skipped_tasks: [...this.unavailableTasks].map(([task_id, reason]) => ({ task_id, reason })), ...(this.gitSync ? { git_sync: this.gitSync.state() } : {}), ...(this.lockError ? { lock_error: this.lockError } : {}), ended_at: now() });
     console.log(JSON.stringify({ reason, rounds: this.rows.length, summary: path.join(this.runDir, 'summary.json') }));
     if (this.monitor) {
+      this.refreshMonitorAttention();
       Object.assign(this.monitor.record, { reason, exitCode: code, endedAt: now(), processState: 'exited',
         roadmapState: reason === 'empty' ? 'complete' : reason === 'no_ready_tasks' ? 'blocked' : 'stopped' });
       this.monitorEvent('runner.stopped', { reasonCode: reason });
@@ -364,6 +385,7 @@ export class Runner {
             await this.cli('validate');
           } catch (error) { this.gitSync.failed(error); return await this.finish(this.lockError ? 'lock_lost' : this.signal?.aborted ? 'interrupted' : 'git_sync_error', this.lockError ? 1 : this.signal?.aborted ? 130 : 1); }
         }
+        this.refreshMonitorAttention();
         const selected = await this.nextTasks();
         if (!selected.length) {
           const remaining = await this.cliJson('list', '--format', 'json', ...this.filters);

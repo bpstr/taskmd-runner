@@ -13,6 +13,14 @@ const file = process.env.TASKMD_TASK_FILE, output = process.env.TASKMD_RESULT_FI
 if (!file || !prompt.includes(`\nTask file: ${file}\n`) || !fs.existsSync(file)) throw new Error('Missing readable selected task reference');
 fs.writeFileSync(path.join(process.env.TASKMD_ROUND_DIR, 'invocation.json'), JSON.stringify(process.argv.slice(2)));
 if (mode.endsWith('-first')) mode = path.basename(file).startsWith('001-') ? mode.slice(0, -6) : 'completed';
+if (mode === 'reconciled-monitor-blocker') {
+  const id = path.basename(file).slice(0, 3);
+  if (id === '003') {
+    const reconciled = path.join(path.dirname(file), '001-task.md');
+    fs.writeFileSync(reconciled, fs.readFileSync(reconciled, 'utf8').replace('status: blocked', 'status: completed'));
+  }
+  mode = ['001', '002'].includes(id) ? 'blocked' : 'completed';
+}
 if (mode === 'review-recoverable') mode = process.env.TASKMD_BLOCKER_REVIEW === '1' ? 'completed' : 'blocked';
 if (mode === 'partial-once') mode = /taskmd-runner runs: 1 -->/.test(fs.readFileSync(file, 'utf8')) ? 'partial' : 'completed';
 if (mode === 'timeout-once') mode = /taskmd-runner runs: 1 -->/.test(fs.readFileSync(file, 'utf8')) ? 'timeout' : 'completed';

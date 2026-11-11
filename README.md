@@ -332,6 +332,11 @@ streams for the selected connection as historical reports. A configured invocati
 can retry one stored stream using an already verified connection. Saved settings
 and retained reports survive package updates.
 
+The runner reconciles its open monitor alerts against the current task files
+between rounds, after Git synchronization. A task completed or reopened
+outside the run clears its alert once the checkout has that change. The run's
+historical blocker receipt and events are retained.
+
 ## Git synchronization
 
 For lanes in separate local checkouts, merge a shared local integration branch
