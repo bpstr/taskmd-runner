@@ -1,6 +1,6 @@
 # taskmd-runner
 
-A sequential taskmd loop: select pending work, claim it, run one coding worker,
+A sequential taskmd loop: select ready work, claim it, run one coding worker,
 validate the result, update the task Markdown and repeat. It exits when the selected
 queue has no ready work. It never polls an empty queue.
 
@@ -29,7 +29,10 @@ node bin/taskmd-runner.js --project /path/to/project --client claude --rounds 3 
 
 The project supplies `.taskmd.yaml`, task files and repository instructions.
 `--rounds 0` (the default) drains ready work. Filters are repeatable and passed
-directly to taskmd. Strict priority ordering preserves phase and dependency gates.
+directly to taskmd. The runner asks `taskmd next` for eligible in-progress work
+first, then for pending work. Taskmd's strict priority ordering preserves phase
+and dependency rules within each status. Task prefixes and worktree exclusions
+apply to both queries.
 
 Each task has a maximum of 5 worker runs (`--max-task-runs 5`). Unfinished work
 becomes blocked after 3 runs by default (`--block-after-runs 3`); the lower limit
@@ -42,7 +45,10 @@ The runner selects independent ready work; dependent tasks remain gated.
 After a timeout, worker failure or pending handoff without verified progress,
 the task stays pending and yields to other ready tasks. Once those tasks have
 had a turn, the runner retries deferred work in taskmd order within the retained
-task and invocation limits. Verified partial work can continue in priority order.
+task and invocation limits. A partial handoff with new verified progress stays
+in progress so a later round or invocation can pick it up before pending work.
+Its receipt records the worker outcome as `status: pending` and the persisted
+task status as `task_status: in-progress`.
 These limits are separate from `--rounds`, which caps workers for the whole
 invocation. Each worker has a two-hour timeout by default (`--timeout 7200`),
 allowing up to six hours over three runs. To allow five sessions for a task that has
@@ -54,7 +60,7 @@ and worklog compaction. Tasks without a counter start at zero; earlier runs are
 not reconstructed. Preserve the counter when editing handoffs. A blocked task
 requires owner review before explicitly returning it to pending; raise both
 thresholds above its retained count to grant more runs. An already exhausted
-pending task is blocked before another worker starts.
+ready task is blocked before another worker starts.
 
 Use `--review-blockers` (MCP `runner_start.review_blockers`) to review a
 worker-reported blocker once before publishing it. The runner starts a fresh

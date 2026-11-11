@@ -142,20 +142,27 @@ export class Runner {
     return within(file) && within(fs.realpathSync(file));
   }
   async nextTasks(): Promise<Record<string, any>[]> {
-    // Preserve taskmd's order within each pass through ready work; stop expanding
-    // as soon as an allowed candidate appears. The search is always bounded.
-    const expand = this.taskPrefixes.length > 0 || this.unavailableTasks.size > 0 || this.deferredTasks.size > 0;
+    const active = await this.nextTask('in-progress');
+    if (active) return [active];
+    const pending = await this.nextTask('pending');
+    return pending ? [pending] : [];
+  }
+  private async nextTask(status: 'in-progress' | 'pending'): Promise<Record<string, any> | undefined> {
+    // Preserve taskmd's order within each status, with a bounded search for local work.
+    const deferPending = status === 'pending' && this.deferredTasks.size > 0;
+    const expand = this.taskPrefixes.length > 0 || this.unavailableTasks.size > 0 || deferPending;
+    const eligible = (task: Record<string, any>) => !task.remote_only && !this.unavailableTasks.has(String(task.id)) && this.inScope(task);
     let deferred: Record<string, any> | undefined;
     for (let limit = expand ? 64 : 1; limit <= 4096; limit *= 4) {
-      const rows = await this.cliJson('next', '--format', 'json', '--strict-priority', '--limit', String(limit), '--filter', 'status=pending', ...this.filters);
+      const rows = await this.cliJson('next', '--format', 'json', '--strict-priority', '--limit', String(limit), '--filter', `status=${status}`, ...this.filters);
       if (!Array.isArray(rows)) throw new Error('Unexpected taskmd next response; not an empty backlog');
-      const candidate = rows.find(task => !this.unavailableTasks.has(String(task.id)) && !this.deferredTasks.has(String(task.id)) && this.inScope(task));
-      if (candidate) return [candidate];
-      deferred ??= rows.find(task => !this.unavailableTasks.has(String(task.id)) && this.inScope(task));
+      const candidate = rows.find(task => (!deferPending || !this.deferredTasks.has(String(task.id))) && eligible(task));
+      if (candidate) return candidate;
+      if (deferPending) deferred ??= rows.find(eligible);
       if (!expand || rows.length < limit) {
         // Start another pass only after every other ready task has had a turn.
         if (deferred) this.deferredTasks.clear();
-        return deferred ? [deferred] : [];
+        return deferred;
       }
     }
     throw new Error('Scoped selection reached 4096 candidates; narrow the taskmd filters');
@@ -187,7 +194,7 @@ export class Runner {
     try {
       row.git_sync = await this.gitSync.after(row.round, row.task_id, row.status, async () => {
         const merged = readTask(file), journal = merged.body.split('\n## Progress').slice(1).join('\n## Progress');
-        if (!isDeepStrictEqual(contract(file), before) || merged.meta.status !== row.status || taskRuns(file) !== row.task_run || !journal.includes(acceptedJournal) || ((row.status === 'completed' || row.status === 'in-review') && checks(file)[1])) throw new Error('Git integration changed the accepted task contract, status or handoff');
+        if (!isDeepStrictEqual(contract(file), before) || merged.meta.status !== (row.task_status ?? row.status) || taskRuns(file) !== row.task_run || !journal.includes(acceptedJournal) || ((row.status === 'completed' || row.status === 'in-review') && checks(file)[1])) throw new Error('Git integration changed the accepted task contract, status or handoff');
         await this.cli('validate');
       });
     } catch (error) {
@@ -370,12 +377,14 @@ export class Runner {
           return await this.finish(unfinished ? 'no_ready_tasks' : 'empty', unfinished ? 2 : 0);
         }
         const id = String(selected[0].id);
+        const selectedStatus = effectiveStatus(selected[0]);
         const task = await this.cliJson('get', id, '--exact', '--format', 'json');
-        if (!this.inScope(task) || task.remote_only || effectiveStatus(task) !== 'pending') { this.skipTask(id, 'claim_conflict'); continue; }
+        if (task.remote_only || !this.inScope(task) || !['pending', 'in-progress'].includes(selectedStatus) || effectiveStatus(task) !== selectedStatus) { this.skipTask(id, 'claim_conflict'); continue; }
         const file = fs.realpathSync(path.resolve(this.tasks, task.file_path));
         const relative = path.relative(this.tasks, file);
         if (relative.startsWith('..' + path.sep) || relative === '..' || path.isAbsolute(relative)) throw new Error('Selected task is outside task directory');
         const meta = readTask(file).meta;
+        if (meta.status !== selectedStatus) { this.skipTask(id, 'claim_conflict'); continue; }
         let unmetDependency = false;
         for (const dep of meta.dependencies || []) {
           const prerequisite = await this.cliJson('get', String(dep), '--exact', '--format', 'json');
@@ -413,7 +422,7 @@ export class Runner {
         if (!/^[\w.-]+$/.test(id) || id === '.' || id === '..') throw new Error('Unsafe task ID');
         if (await this.controlCheckpoint() && this.gitSync) continue;
         if (this.signal.aborted) return await this.finish(this.lockError ? 'lock_lost' : 'interrupted', this.lockError ? 1 : 130);
-        await this.status(id, 'in-progress');
+        if (selectedStatus === 'pending') await this.status(id, 'in-progress');
         let taskRun = previousRuns, clarification: Clarification | undefined;
         while (true) {
           const folder = path.join(this.runDir, `${String(this.rows.length + 1).padStart(3, '0')}-${id}`);
@@ -494,7 +503,12 @@ export class Runner {
             } else if (noProgress) row.recovery_reason = 'no_progress';
             await this.record(file, `${status}: ${result.summary}\n\nEvidence: ${result.evidence.join('; ')}\n\nNext: ${result.next_step}`, true, notes);
             if (row.review_request) await this.record(file, row.review_request);
-            await this.status(id, status); await this.cli('validate');
+            if (status === 'pending' && !noProgress) {
+              row.task_status = 'in-progress';
+            } else {
+              await this.status(id, status);
+            }
+            await this.cli('validate');
             Object.assign(row, { status, ended_at: now(), checked_before: count[0], checked_after: checks(file)[0], verified_before: verifiedBefore, verified_after: verifiedCount(file), result });
             if (status === 'pending' && noProgress) {
               this.deferredTasks.add(id);
