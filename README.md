@@ -84,7 +84,12 @@ worker in seconds (default 7200, or two hours). `--client` defaults to `codex`; 
 `--effort` use these defaults for Codex and are otherwise passed only when supplied. Clients that do not support an effort
 override fail before a task is claimed. Other clients inherit their permission
 configuration; `--permissions bypass` explicitly enables unattended permissions.
-Codex retains the original sandbox and `approval_policy="never"` behavior.
+Use `--codex-permissions-profile NAME` (MCP `codex_permissions_profile`) to
+select a named profile already configured in Codex. This requires a Codex
+version whose app server supports named profiles. The same profile applies when
+starting and resuming a thread. Interactive approvals remain disabled. Use the
+profile with the Codex worker and the default runner permission and sandbox
+flags.
 `--executable` overrides the selected agent binary. Each task starts a fresh
 session. Workers continue through full task acceptance within the supplied
 deadline; verified slices are checkpoints within execution. Sizing estimates do

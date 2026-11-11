@@ -40,7 +40,7 @@ The third still requires conflict handling and affected verification.
 | Before work | `GitSync.before()` checks clean state, fetches and integrates upstream; the runner validates taskmd and dependencies. | A machine sees remote progress at task boundaries. |
 | Claim | The runner sets `in-progress` and writes its start note locally, then launches the worker. | Other machines cannot see the start until a later accepted handoff. |
 | Handoff | `GitSync.after()` commits changed files and task state and pushes. Completed, partial and blocked handoffs can publish. | Progress already has a durable Git transport. |
-| Push race | Fetch, merge, verify the accepted task handoff and retry once. | Disjoint edits can converge; sustained publication contention can still stop a runner. |
+| Push race | Fetch after rejection. When upstream contains commits missing from local HEAD, integrate them, verify the accepted task handoff and retry once. This also covers a tracking ref already advanced by another process. | Disjoint edits can converge. Sustained contention can still prevent publication. |
 | Conflict | Preserve the merge and stop by default. An explicitly selected conflict worker is available. | Source overlap needs reconciliation even when task prefixes differ. |
 | Waiting | No ready tasks ends the run. | A machine stops rather than waiting for a dependency owned by another machine. |
 | Evidence | Receipts and `git-sync.json` are local run artifacts; progress notes can reference absolute local paths. | A synced task does not imply that its detailed local evidence is accessible elsewhere. |

@@ -24,6 +24,7 @@ export interface Options extends NotificationOptions {
   maxTaskRuns: number; blockAfterRuns: number;
   reviewBlockers?: boolean;
   codexSessionPolicy?: 'isolated' | 'shared';
+  codexPermissionsProfile?: string;
   sandbox: 'workspace-write' | 'danger-full-access'; permissions: 'default' | 'bypass';
   model?: string; effort?: string; worker?: string[];
   gitSync: boolean; gitRepo: string[]; gitConflicts: GitConflictPolicy; gitIntegrationBranch?: string;
@@ -288,11 +289,12 @@ export class Runner {
           permissions: this.args.permissions, timeoutMs: Math.max(1, deadline - Date.now()), signal: this.signal,
           // Tool output is one JSON event; its limit is separate from retained output tails.
           maxEventBytes: 16 * 1024 * 1024,
-          // Preserve Codex's original workspace-write/never policy via a small executable wrapper.
+          // The wrapper applies the selected Codex permission mode without interactive approvals.
           env: { ...env, ...(this.args.client === 'codex' && this.args.codexSessionPolicy !== 'shared'
             ? { CODEX_HOME: isolatedCodexHome(this.runDir), TASKMD_CODEX_ISOLATED_HOME: path.join(this.runDir, 'codex-home') }
             : { TASKMD_CODEX_ISOLATED_HOME: undefined }),
-            TASKMD_CODEX_SANDBOX: this.args.sandbox, TASKMD_CODEX_EXECUTABLE: this.args.executable || 'codex', TASKMD_RESULT_SCHEMA: path.join(HERE, 'result.schema.json') },
+            TASKMD_CODEX_SANDBOX: this.args.sandbox, TASKMD_CODEX_PERMISSIONS_PROFILE: this.args.codexPermissionsProfile,
+            TASKMD_CODEX_EXECUTABLE: this.args.executable || 'codex', TASKMD_RESULT_SCHEMA: path.join(HERE, 'result.schema.json') },
           onOutput: chunk => { log.write(chunk); },
         });
         jsonFile(path.join(folder, 'agent.json'), { client: result.client, status: result.status, code: result.code, signal: result.signal,
