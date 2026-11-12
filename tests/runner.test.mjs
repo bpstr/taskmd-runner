@@ -334,25 +334,29 @@ test('invalid response clarification respects invocation and task run budgets', 
     if (previous) assert.match(r.summary.blocked_tasks[0].review_request, limitReview);
   }
 });
-for (const race of ['claim', 'dependency']) {
+for (const race of ['claim', 'in-progress claim', 'dependency']) {
   test(`unavailable ${race} selection is skipped without stopping independent work or spinning`, async t => {
     const root = fixture(t);
-    task(root, '001', { status: race === 'dependency' ? 'blocked' : 'pending', priority: 'critical' });
+    const status = { claim: 'pending', 'in-progress claim': 'in-progress', dependency: 'blocked' }[race];
+    const first = task(root, '001', { status, priority: 'critical' });
     task(root, '002', { dependencies: race === 'dependency' ? ['001'] : [] });
     if (race === 'dependency') task(root, '003');
     const runner = new Runner(parseArgs(['--project', root, '--notify', 'off', '--timeout', '10', '--worker', process.execPath, fake, 'completed']));
     const cli = runner.cliJson.bind(runner); let injected = false, claims = 0;
     runner.cliJson = async (...args) => {
-      if (race === 'dependency' && args[0] === 'next' && !injected) { injected = true; return [await cli('get', '002', '--exact', '--format', 'json')]; }
+      if (race === 'dependency' && args[0] === 'next' && args.includes('status=pending') && !injected) { injected = true; return [await cli('get', '002', '--exact', '--format', 'json')]; }
       const value = await cli(...args);
-      if (race === 'claim' && args[0] === 'get' && args[1] === '001') { claims++; return { ...value, remote_only: true }; }
+      if (race !== 'dependency' && args[0] === 'get' && args[1] === '001') { claims++; return { ...value, remote_only: true }; }
       return value;
     };
     assert.equal(await runner.run(), 2);
     const summary = JSON.parse(fs.readFileSync(path.join(runner.runDir, 'summary.json'), 'utf8'));
     assert.equal(summary.reason, 'no_ready_tasks');
-    assert.deepEqual(summary.rounds.map(row => row.task_id), [race === 'claim' ? '002' : '003']);
-    if (race === 'claim') assert.ok(claims <= 2);
+    assert.deepEqual(summary.rounds.map(row => row.task_id), [race === 'dependency' ? '003' : '002']);
+    if (race !== 'dependency') {
+      assert.ok(claims > 0 && claims <= 2);
+      assert.equal(readTask(first).meta.status, status);
+    }
     else assert.equal(readTask(path.join(root, 'tasks/002-task.md')).meta.status, 'pending');
   });
 }
@@ -377,6 +381,7 @@ test('deferred selection expands past a full page and stops at the first fresh c
   runner.deferredTasks = new Set(deferred.map(task => task.id));
   const limits = [];
   runner.cliJson = async (...args) => {
+    if (args.includes('status=in-progress')) return [];
     const limit = Number(args[args.indexOf('--limit') + 1]);
     limits.push(limit);
     return [...deferred, { id: 'fresh' }, { id: 'unrelated' }].slice(0, limit);
@@ -492,6 +497,11 @@ test('early checkpoint continuations are bounded across invocation caps and rest
     const r = await run(root, 'partial', ['--rounds', '1']);
     assert.equal(r.summary.rounds.length, 1); assert.equal(taskRuns(file), runNumber);
     assert.equal(r.summary.rounds[0].attempts.length, 3);
+    if (runNumber < 3) {
+      assert.equal(r.summary.rounds[0].task_status, 'in-progress');
+      assert.equal(readTask(file).meta.status, 'in-progress');
+      if (runNumber === 1) task(root, '002', { priority: 'critical' });
+    }
   }
   assert.equal(readTask(file).meta.status, 'blocked');
 });
@@ -830,6 +840,18 @@ test('task prefixes select API or Astro while preserving excluded prerequisites'
   assert.equal(r.code, 0, r.stderr); assert.deepEqual(r.summary.rounds.map(row => row.task_id), ['002', '003']);
   assert.ok(r.summary.rounds.every(row => /^(api|astro)\//.test(row.task_path)));
   for (const file of [desktop, mobile, dependent, sibling]) assert.equal(readTask(file).meta.status, 'pending');
+});
+test('taskmd next ranks eligible in-progress work before pending work', async t => {
+  const root = fixture(t);
+  const outside = task(root, '001', { directory: 'desktop', status: 'in-progress', priority: 'critical' });
+  task(root, '002', { directory: 'mobile', priority: 'critical' });
+  task(root, '003', { directory: 'mobile', status: 'in-progress', priority: 'low' });
+  task(root, '004', { directory: 'mobile', status: 'in-progress', priority: 'high' });
+  const dependent = task(root, '005', { directory: 'mobile', status: 'in-progress', priority: 'critical', dependencies: ['001'] });
+  const r = await run(root, 'completed', ['--task-prefix', 'mobile', '--rounds', '3']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual(r.summary.rounds.map(row => row.task_id), ['004', '003', '002']);
+  for (const file of [outside, dependent]) assert.equal(readTask(file).meta.status, 'in-progress');
 });
 test('task prefixes reject a symlink that redirects API scope to Desktop', async t => {
   const root = fixture(t); const file = task(root, '001', { directory: 'desktop', priority: 'critical' });

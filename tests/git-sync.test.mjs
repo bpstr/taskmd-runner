@@ -222,6 +222,21 @@ for (const rejectPush of [false, true]) test(`multi-repository workspace checkpo
     assert.match(git(taskRemote, 'show', 'main:002-task.md'), /status: completed/);
   }
 });
+test('publishes a verified partial handoff as in-progress across invocations', async t => {
+  const base = temporary(t), { repo, remote } = repository(base); tasks(repo, 2);
+  commit(repo); git(repo, 'push');
+  const options = ['--rounds', '1', '--state-dir', path.join(base, 'runner-state')];
+  const first = await run(repo, options, { PREPARED_GIT_MODE: 'partial-first' });
+  assert.equal(first.code, 0, first.stderr);
+  assert.equal(first.summary.rounds[0].task_status, 'in-progress');
+  assert.equal(first.summary.rounds[0].git_sync, 'pushed');
+  assert.match(git(remote, 'show', 'main:tasks/001-task.md'), /status: in-progress/);
+
+  const second = await run(repo, options);
+  assert.equal(second.code, 0, second.stderr || JSON.stringify(second.summary?.git_sync));
+  assert.equal(second.summary.rounds[0].task_id, '001');
+  assert.match(git(remote, 'show', 'main:tasks/001-task.md'), /status: completed/);
+});
 for (const previousRuns of [2, 3]) {
   test(`task run limits publish a blocked handoff with ${previousRuns} prior runs and continue`, async t => {
     const base = temporary(t), { repo, remote } = repository(base); tasks(repo, 2);
