@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { acquirePublisher } from "./monitor-lock.js";
+import { flushStored, rememberTerminalAttention, resolvedTerminalAttention } from "./monitor-replay.js";
 import { fileURLToPath } from "node:url";
 import {
   atomicJson,
@@ -198,6 +199,9 @@ type State = {
   sequence: number;
   events: any[];
   terminal?: any;
+  attentionReceipt?: any;
+  taskDirectory?: string;
+  taskBlockers?: Record<string, string>;
   initial?: any;
   historyGap?: boolean;
   [key: string]: any;
@@ -257,12 +261,15 @@ export class MonitorReporter {
   transport: typeof fetch;
   diagnosed = false;
   release: (() => void) | null = null;
+  private refreshAttention?: () => void;
   constructor(
     public record: MonitorRun,
     options: {
       config?: MonitorConfig;
       transport?: typeof fetch;
       timers?: boolean;
+      taskDirectory?: string;
+      refreshAttention?: () => void;
     } = {},
   ) {
     const config = options.config ?? monitorConfig();
@@ -274,6 +281,8 @@ export class MonitorReporter {
     this.release = acquirePublisher(this.file);
     if (!this.release) throw new Error("Publisher already active");
     this.state = load(this.file, this.config);
+    this.state.taskDirectory = options.taskDirectory;
+    this.refreshAttention = options.refreshAttention;
     this.state.incarnationId = randomUUID();
     this.state.activityAt = new Date().toISOString();
     if (options.timers !== false) {
@@ -286,6 +295,8 @@ export class MonitorReporter {
     this.timer = setTimeout(
       () => {
         void this.send();
+        if (this.state.taskDirectory)
+          void flushMonitor(1, this.state.taskDirectory).catch(() => {});
         this.schedule();
       },
       60000 * (0.9 + Math.random() * 0.2),
@@ -447,6 +458,7 @@ export class MonitorReporter {
     try {
       await this.verify();
       // Generate a current observation immediately before sending. No live heartbeat backlog.
+      if (!this.closed) this.refreshAttention?.();
       const report = this.closed
         ? this.state.terminal
         : projectMonitor(this.record, this.state);
@@ -485,6 +497,7 @@ export class MonitorReporter {
         this.state.terminal?.report_sequence === report.report_sequence &&
         this.state.events.length === 0
       ) {
+        rememberTerminalAttention(this.state, report);
         delete this.state.terminal;
         delete this.state.replayBase;
       }
@@ -552,15 +565,15 @@ export class MonitorReporter {
     }
   }
 }
-export function attachMonitor(record: MonitorRun) {
+export function attachMonitor(record: MonitorRun, options?: ConstructorParameters<typeof MonitorReporter>[1]) {
   try {
     if (!monitorConfig()) return null;
-    return new MonitorReporter(record);
+    return new MonitorReporter(record, options);
   } catch {
     return null;
   }
 }
-export async function flushMonitor(maxStreams = 32) {
+export async function flushMonitor(maxStreams = 32, taskDirectory?: string) {
   const config = monitorConfig();
   if (!config) return { enabled: false, attempted: 0 };
   if (maxStreams === 1 && !config.verified)
@@ -578,12 +591,13 @@ export async function flushMonitor(maxStreams = 32) {
     let state: State;
     try { state = JSON.parse(fs.readFileSync(path.join(dir, name), "utf8")); } catch { continue; }
     if (!Array.isArray(state.events)) continue;
-    if (!state.terminal && !state.events.length) continue;
-    const report = state.terminal ?? state.replayBase ?? state.initial;
+    const shouldReconcile = (!taskDirectory || state.taskDirectory === taskDirectory) &&
+      resolvedTerminalAttention(state) !== null;
+    if (!shouldReconcile && !state.terminal && !state.events.length) continue;
+    const report = state.terminal ?? state.replayBase ?? state.initial ?? state.attentionReceipt;
     if (!report) continue;
     // Historical flush uses the stored envelope only. It never claims exited publishers are live.
-    const transport = await import("./monitor-replay.js");
-    await transport.flushStored(config, path.join(dir, name), state);
+    await flushStored(config, path.join(dir, name), taskDirectory);
     attempted++;
   }
   return { enabled: true, attempted };

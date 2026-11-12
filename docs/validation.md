@@ -907,3 +907,16 @@ and invalid-CLI controls (expected under two seconds). Then inspect the actual
 release tarball and its installed `--version`/`--help` entry points without
 starting a model worker. No new live client sessions or full-suite run are needed.
 The three affected publication checks passed: zero failures or skips (0.46 seconds).
+
+## Resolved task attention
+
+Use the monitor tests and the prepared runner reporting selectors. Verify that a
+live snapshot refreshes task state, a later flush can revise a terminal snapshot
+with a higher sequence, and retry preserves that sequence after a delivery
+failure. A different task directory or a replaced task ID must leave the original
+alert open. Removing the last task alert preserves the terminal outcome and does
+not add a new run alert. The TypeScript build, eight monitor checks and five
+prepared runner reporting checks passed. The prepared tests use a loopback
+receiver and no model calls. The selectors took under four seconds after the
+build. Their coverage is limited to reporting and replay, so no wider runner
+suite was needed.

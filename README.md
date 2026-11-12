@@ -308,8 +308,12 @@ Configured invocations report automatically, including custom workers. The
 dashboard shows `Taskmd · PROJECT`, task IDs/titles, rounds, validated summaries,
 blockers and terminal outcomes. An empty finished queue is completed; a round cap
 requires attention even when the CLI exits successfully. Blocked tasks remain
-visible while independent work continues. Interruptions are cancelled; unexpected
-runner failures are failed. Existing runs need restarting to adopt reporting.
+visible while independent work continues. Heartbeats clear task alerts when the
+same local task is requeued, taken up, completed, or cancelled. Terminal reports
+retain outstanding task alerts for reconciliation by a later runner in the same
+task directory or by `monitor flush`. The original run outcome and task history
+are preserved. Interruptions are cancelled; unexpected runner failures are failed.
+Existing processes use the reporting code loaded when they started.
 
 `monitor disable` / `monitor enable` preserve the connection and its identity.
 `TASKMD_MONITOR=off` disables reporting for one invocation. Environment overrides
@@ -331,11 +335,6 @@ reports and sparse events remain on disk; `monitor flush` retries up to 32 store
 streams for the selected connection as historical reports. A configured invocation
 can retry one stored stream using an already verified connection. Saved settings
 and retained reports survive package updates.
-
-The runner reconciles its open monitor alerts against the current task files
-between rounds, after Git synchronization. A task completed or reopened
-outside the run clears its alert once the checkout has that change. The run's
-historical blocker receipt and events are retained.
 
 ## Git synchronization
 

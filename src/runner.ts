@@ -13,6 +13,7 @@ import { GitSync, type GitConflict, type GitConflictPolicy } from './git.js';
 import { acquireTaskLock, taskLease, taskRegistryLease } from './lock.js';
 import { isolatedCodexHome } from './codex.js';
 import { attachMonitor, flushMonitor, type MonitorReporter } from './monitor.js';
+import { taskBlockerResolved } from './monitor-replay.js';
 import { withoutMonitorCredentials } from './monitor-state.js';
 import { RunControl } from './control.js';
 
@@ -171,20 +172,14 @@ export class Runner {
   private refreshMonitorAttention() {
     if (!this.monitor) return;
     for (const [id, blocker] of this.monitorBlockers) {
-      try {
-        const file = path.join(this.tasks, blocker.taskPath);
-        if (fs.realpathSync(file) !== file) continue;
-        const current = readTask(file).meta;
-        if (String(current.id) === id &&
-            ['pending', 'in-progress', 'in-review', 'completed', 'cancelled'].includes(current.status))
-          this.monitorBlockers.delete(id);
-      } catch {
-        // An unreadable or moved task does not prove that its blocker was resolved.
-      }
+      if (taskBlockerResolved(this.tasks, id, blocker.taskPath)) this.monitorBlockers.delete(id);
     }
     this.monitor.record.attentionTasks = [...this.monitorBlockers.keys()];
     this.monitor.record.attentionReasons = Object.fromEntries(
       [...this.monitorBlockers].map(([id, blocker]) => [id, blocker.reason]),
+    );
+    this.monitor.state.taskBlockers = Object.fromEntries(
+      [...this.monitorBlockers].map(([id, blocker]) => [id, blocker.taskPath]),
     );
   }
   private async reportBlocked(row: Record<string, any>, folder?: string) {
@@ -359,9 +354,10 @@ export class Runner {
       release = await acquireTaskLock(this.tasks, error => { this.lockError = error.message; lease.abort(); }, this.args.gitSync || this.args.gitIntegrationBranch ? [] : this.taskPrefixes);
       fs.mkdirSync(this.runDir, { recursive: true });
       this.monitor = attachMonitor({ id: this.control.status.run_id.replaceAll('-', '').slice(0, 24), roadmap: this.root,
-        createdAt: now(), readyAt: now(), processState: 'running', roadmapState: 'in_progress', pid: process.pid });
+        createdAt: now(), readyAt: now(), processState: 'running', roadmapState: 'in_progress', pid: process.pid },
+      { taskDirectory: this.tasks, refreshAttention: () => this.refreshMonitorAttention() });
       this.monitorEvent('runner.started');
-      if (this.monitor) void flushMonitor(1).catch(() => {});
+      if (this.monitor) void flushMonitor(1, this.tasks).catch(() => {});
       // Check adapter controls before claiming any task.
       if (!this.args.worker) buildRunnerInvocation({ client: this.args.client, prompt: 'preflight', workdir: this.root, model: this.args.model, effort: this.args.effort, permissions: this.args.permissions });
       if (this.args.gitSync || this.args.gitIntegrationBranch) {
