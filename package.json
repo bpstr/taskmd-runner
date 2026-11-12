@@ -1,6 +1,6 @@
 {
   "name": "@bpstr/taskmd-runner",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "Sequential taskmd execution through coding-agent CLI clients",
   "type": "module",
   "bin": {

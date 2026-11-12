@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.3 — 2026-11-12
+
+- Resume eligible in-progress tasks before selecting pending work. Retain
+  verified partial handoffs as in progress across invocations.
+- Stop workers on log write failures and retain the task checkpoint and run
+  count. Reconcile dead controllers into run history and queue terminal Roadmap
+  Monitor reports for their saved streams.
+- Default to a 90-minute task run with a 60-minute completion target and a
+  five-run limit per unfinished task.
+
 ## 0.4.2 — 2026-11-10
 
 - Give independent ready tasks a turn before retrying timeouts, worker failures

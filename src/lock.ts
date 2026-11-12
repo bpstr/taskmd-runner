@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { lock } from 'proper-lockfile';
+import { atomicJson } from './monitor-state.js';
 
 export const taskLease = (tasks: string) => path.join(tasks, '.taskmd-runner.lease');
 export const taskRegistryLease = (tasks: string) => path.join(tasks, '.taskmd-runner.registry.lease');
@@ -44,9 +45,7 @@ function readRegistry(tasks: string): Registry | undefined {
 }
 function writeRegistry(tasks: string, registry: Registry) {
   const directory = taskLease(tasks);
-  const temporary = path.join(directory, 'owners-' + randomUUID() + '.tmp');
-  fs.writeFileSync(temporary, JSON.stringify(registry) + '\n', { flag: 'wx' });
-  fs.renameSync(temporary, path.join(directory, 'owners.json'));
+  atomicJson(path.join(directory, 'owners.json'), registry);
   const now = new Date(); fs.utimesSync(directory, now, now);
 }
 

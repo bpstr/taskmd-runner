@@ -237,17 +237,17 @@ test('publishes a verified partial handoff as in-progress across invocations', a
   assert.equal(second.summary.rounds[0].task_id, '001');
   assert.match(git(remote, 'show', 'main:tasks/001-task.md'), /status: completed/);
 });
-for (const previousRuns of [2, 3]) {
+for (const previousRuns of [4, 5]) {
   test(`task run limits publish a blocked handoff with ${previousRuns} prior runs and continue`, async t => {
     const base = temporary(t), { repo, remote } = repository(base); tasks(repo, 2);
     const file = path.join(repo, 'tasks/001-task.md'); setTaskRuns(file, previousRuns);
     commit(repo); git(repo, 'push');
     const r = await run(repo, [], { PREPARED_GIT_MODE: 'partial-first' });
     assert.equal(r.code, 2, r.stderr); assert.equal(r.summary.reason, 'no_ready_tasks');
-    assert.deepEqual(r.summary.rounds.map(row => row.task_id), previousRuns === 2 ? ['001', '002'] : ['002']);
-    assert.equal(taskRuns(file), 3); assert.equal(readTask(file).meta.status, 'blocked');
+    assert.deepEqual(r.summary.rounds.map(row => row.task_id), previousRuns === 4 ? ['001', '002'] : ['002']);
+    assert.equal(taskRuns(file), 5); assert.equal(readTask(file).meta.status, 'blocked');
     const published = git(remote, 'show', 'main:tasks/001-task.md');
-    assert.match(published, /status: blocked/); assert.match(published, /Task run limit reached \(3\/3\)/);
+    assert.match(published, /status: blocked/); assert.match(published, /Task run limit reached \(5\/5\)/);
     assert.match(published, /review this task or split it into subtasks that collectively preserve the original scope and acceptance criteria/);
     assert.match(git(remote, 'show', 'main:tasks/002-task.md'), /status: completed/);
     assert.equal(git(repo, 'status', '--porcelain', '--untracked-files=no'), '');
@@ -259,7 +259,7 @@ for (const mode of ['pending-first', 'exit-first', 'unrepairable-first', 'scope-
     const base = temporary(t), { repo, remote } = repository(base); tasks(repo, 2); commit(repo); git(repo, 'push');
     const r = await run(repo, [], { PREPARED_GIT_MODE: mode, PREPARED_GIT_REPOS: JSON.stringify([repo]) });
     assert.equal(r.code, 2, r.stderr); assert.equal(r.summary.reason, 'no_ready_tasks');
-    const attempts = ['pending-first', 'exit-first'].includes(mode) ? 3 : mode === 'unrepairable-first' ? 2 : 1;
+    const attempts = ['pending-first', 'exit-first'].includes(mode) ? 5 : mode === 'unrepairable-first' ? 2 : 1;
     const expected = ['pending-first', 'exit-first'].includes(mode)
       ? ['001', '002', ...Array(attempts - 1).fill('001')]
       : [...Array(attempts).fill('001'), '002'];

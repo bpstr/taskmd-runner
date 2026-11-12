@@ -1,5 +1,40 @@
 # Runner validation
 
+## 0.4.3 release
+
+Scope includes PR #5, storage recovery for issue #6, and the session defaults.
+Issue #2 shipped in v0.3.3. The PR-head build and 13 prepared cases passed for
+context handoffs, deadline and cancellation behavior, in-progress selection,
+fair retries, and Git checkpoint publication. Preserve the baseline logs.
+
+Build the final source and select runner cases covering ENOSPC, task-run limits,
+checkpoints, provider context and failure recovery, timeouts, CLI defaults, and
+the adjacent blocker-review paths. Run the control, lock and Monitor fixture
+files because registry writes, lane reconciliation and terminal replay share
+those contracts. Select Git task-limit publication, verified partial handoffs,
+and conflict worker dispatch. Reuse the previous release evidence for unrelated
+adapters, notifications and Git paths. Expected wall time is two minutes.
+
+Pack, install offline, and verify package metadata, every archived file, CLI
+version and help, and MCP initialization and discovery. Completion requires
+zero focused failures and a clean whitespace check. Retain the logs and package
+proofs in the parent release directory. All execution uses prepared workers,
+local Git remotes and a loopback Monitor fixture.
+
+Results. The build, whitespace check and 65 distinct prepared cases passed
+across the final selections. The initial runner batch had two fixture failures.
+One still stopped after three invocations, and the 100 ms timeout also caught
+an independent fixture during concurrent runs. Both corrected cases passed on
+the focused rerun. Git passed six cases, and control, Monitor and locks passed
+23. Logs include the original failures and the passing rerun.
+
+After warming the dependency cache, the packed archive installed offline.
+All 57 files matched the release checkout and the offline installation. The
+installed CLI reported 0.4.3 and the new timeout and run limits. MCP reported
+the expected four tools and retained the Git conflict and blocker-review inputs.
+The 99,259-byte archive has SHA-256
+`2e1cd0c5564a474f3d2287cf4b489339d11f3c934d06c04c14227354b25c615c`.
+
 ## 0.4.2 GitHub release
 
 The release combines fair scheduling of retryable task failures with the requested

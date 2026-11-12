@@ -560,6 +560,28 @@ export function attachMonitor(record: MonitorRun) {
     return null;
   }
 }
+export function queueRecoveredMonitor(record: MonitorRun) {
+  try {
+    const config = monitorConfig();
+    if (!config) return;
+    const file = outboxFile(config, record.id);
+    if (!fs.existsSync(file)) return;
+    const release = acquirePublisher(file);
+    if (!release) return;
+    try {
+      const state = load(file, config);
+      const previous = state.replayBase ?? state.initial;
+      if (state.terminal || previous?.source_run_id !== record.id || previous.run.terminal) return;
+      state.terminal = projectMonitor({ ...record,
+        createdAt: previous.process.started_at, readyAt: previous.run.ready_at,
+        role: previous.run.role, task: previous.run.task_id, iteration: previous.run.iteration,
+      }, state, true);
+      persist(file, state);
+    } finally { release(); }
+  } catch {
+    // The saved run remains available for reconciliation after storage recovers.
+  }
+}
 export async function flushMonitor(maxStreams = 32) {
   const config = monitorConfig();
   if (!config) return { enabled: false, attempted: 0 };
