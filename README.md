@@ -34,9 +34,8 @@ first, then for pending work. Taskmd's strict priority ordering preserves phase
 and dependency rules within each status. Task prefixes and worktree exclusions
 apply to both queries.
 
-Each task has a maximum of 5 worker runs (`--max-task-runs 5`). Unfinished work
-becomes blocked after 3 runs by default (`--block-after-runs 3`); the lower limit
-applies. A verified partial slice counts as a run. Completion or a valid PR-review
+Unfinished tasks block after five charged runs by default. Adjust the limit with
+`--max-task-runs` and `--block-after-runs`. The lower value applies. Completion or a valid PR-review
 handoff on the final allowed run is accepted. At the limit, the runner records
 the blocker and requests owner review or splitting into subtasks that collectively
 preserve the original scope and acceptance criteria. This request appears in the
@@ -49,10 +48,7 @@ task and invocation limits. A partial handoff with new verified progress stays
 in progress so a later round or invocation can pick it up before pending work.
 Its receipt records the worker outcome as `status: pending` and the persisted
 task status as `task_status: in-progress`.
-These limits are separate from `--rounds`, which caps workers for the whole
-invocation. Each worker has a two-hour timeout by default (`--timeout 7200`),
-allowing up to six hours over three runs. To allow five sessions for a task that has
-been reviewed, raise both thresholds, for example `--block-after-runs 5`.
+`--rounds` caps charged runs for the whole invocation.
 
 The runner keeps a `<!-- taskmd-runner runs: N -->` counter under `## Progress`,
 so counts survive restarts, changed evidence directories, Git synchronization
@@ -85,8 +81,10 @@ owning checkout at claim time; symlinks cannot widen an allowed subtree.
 The default Codex sandbox is `workspace-write`; select `danger-full-access` only
 in an environment where the task already authorizes that access. Model and effort
 default to `gpt-6.1-sol` and `medium` for Codex; explicit flags override them.
-Other clients inherit their configuration. `--timeout` bounds each
-worker in seconds (default 7200, or two hours). `--client` defaults to `codex`; `--model` and
+Other clients inherit their configuration. `--timeout` sets the hard deadline for
+each task run in seconds (default 5400, or 90 minutes). Workers aim to finish and
+verify within 60 minutes when the timeout allows and can continue until the
+deadline. `--client` defaults to `codex`; `--model` and
 `--effort` use these defaults for Codex and are otherwise passed only when supplied. Clients that do not support an effort
 override fail before a task is claimed. Other clients inherit their permission
 configuration; `--permissions bypass` explicitly enables unattended permissions.
@@ -267,8 +265,15 @@ A drained queue or round cap can finish before reaching another pause boundary.
 Stop uses the existing cancellation/reconciliation behavior: an interrupted
 worker's task becomes blocked and the runner exits with `interrupted` / 130.
 Resume applies only to a live paused run; start a new invocation after exit.
-An unreachable endpoint is reported as `unreachable`, never assumed exited or
-controlled by signaling a saved PID.
+An unreachable endpoint stays visible while its controller PID exists. Once the
+PID is gone, the runner moves the record to history and queues a terminal Monitor
+report for the saved stream when available. A replacement acquires the lane
+through the normal lease, including its stale-lock expiry.
+
+A worker log failure stops the worker and ends the run with `storage_error`.
+The task keeps its checkpoint and charged run so a replacement can resume it.
+If storage prevents terminal writes, the next launch reconciles the saved record
+and Monitor stream after space is available.
 
 Codex task and conflict workers automatically receive a self-scoped MCP exposing
 only `runner_status` and `runner_control`. They can omit `run_id` and cannot

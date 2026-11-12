@@ -13,7 +13,7 @@ import { GitSync, type GitConflict, type GitConflictPolicy } from './git.js';
 import { acquireTaskLock, taskLease, taskRegistryLease } from './lock.js';
 import { isolatedCodexHome } from './codex.js';
 import { attachMonitor, flushMonitor, type MonitorReporter } from './monitor.js';
-import { withoutMonitorCredentials } from './monitor-state.js';
+import { atomicJson, withoutMonitorCredentials } from './monitor-state.js';
 import { RunControl } from './control.js';
 
 const HERE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -57,10 +57,14 @@ class InvalidResponse extends Error {
 class WorkerFailure extends Error {
   constructor(message: string, public kind: string, public metrics?: Record<string, unknown>) { super(message); }
 }
+class StorageFailure extends Error {}
+const isStorageFailure = (error: unknown) => error instanceof StorageFailure ||
+  ['ENOSPC', 'EDQUOT'].includes((error as NodeJS.ErrnoException | undefined)?.code ?? '');
 interface Clarification { folder: string; error: string; sessionId?: string; }
 interface BlockerReview { folder: string; result: WorkerResult; }
 
 const handoffReserve = (seconds: number) => Math.min(60, seconds / 10);
+const completionTargetSeconds = 60 * 60;
 // Include a small safety margin for a worker stopping just before the warning.
 export function pendingReason(result: WorkerResult, remaining: number, budget: number): string {
   if (remaining <= handoffReserve(budget) + Math.min(5, budget / 100)) return 'deadline';
@@ -198,6 +202,7 @@ export class Runner {
         await this.cli('validate');
       });
     } catch (error) {
+      if (isStorageFailure(error)) throw error;
       this.gitSync.failed(error); row.git_sync = 'failed'; row.git_error = this.gitSync.error;
     }
     jsonFile(path.join(folder, 'receipt.json'), row);
@@ -217,26 +222,42 @@ export class Runner {
     fs.writeFileSync(file, scope.trimEnd() + '\n\n## Progress\n\n' + slices.join('\n') + `\n\n${now()} — ${message}\n\n${history}\n`);
     if (runs) setTaskRuns(file, runs);
   }
-  async finish(reason: string, code: number): Promise<number> {
-    jsonFile(path.join(this.runDir, 'summary.json'), { reason, exit_code: code, client: this.args.client, rounds: this.rows, blocked_tasks: this.blockedTasks, skipped_tasks: [...this.unavailableTasks].map(([task_id, reason]) => ({ task_id, reason })), ...(this.gitSync ? { git_sync: this.gitSync.state() } : {}), ...(this.lockError ? { lock_error: this.lockError } : {}), ended_at: now() });
-    console.log(JSON.stringify({ reason, rounds: this.rows.length, summary: path.join(this.runDir, 'summary.json') }));
+  async finish(reason: string, code: number, storageError?: unknown): Promise<number> {
+    const summary = path.join(this.runDir, 'summary.json'), endedAt = now();
+    const report = { reason, rounds: this.rows.length };
+    try {
+      atomicJson(summary, { reason, exit_code: code, client: this.args.client, rounds: this.rows, blocked_tasks: this.blockedTasks,
+        skipped_tasks: [...this.unavailableTasks].map(([task_id, reason]) => ({ task_id, reason })),
+        ...(this.gitSync ? { git_sync: this.gitSync.state() } : {}), ...(this.lockError ? { lock_error: this.lockError } : {}),
+        ...(storageError ? { storage_error: String(storageError) } : {}), ended_at: endedAt });
+      console.log(JSON.stringify({ ...report, summary }));
+    } catch (error) {
+      if (!storageError) throw error;
+      console.log(JSON.stringify({ ...report, storage_error: String(storageError), summary_error: String(error) }));
+    }
     if (this.monitor) {
-      Object.assign(this.monitor.record, { reason, exitCode: code, endedAt: now(), processState: 'exited',
+      Object.assign(this.monitor.record, { reason, exitCode: code, endedAt, processState: 'exited',
         roadmapState: reason === 'empty' ? 'complete' : reason === 'no_ready_tasks' ? 'blocked' : 'stopped' });
       this.monitorEvent('runner.stopped', { reasonCode: reason });
       await this.monitor.finish().catch(() => {});
     }
     await this.notifications.sendForReason(reason, this.root, this.rows.at(-1)?.task_id);
-    this.control?.update({ state: 'exited', reason, exit_code: code, ended_at: now(), task: null, round: this.rows.length });
+    try { this.control?.update({ state: 'exited', reason, exit_code: code, ended_at: endedAt, task: null, round: this.rows.length }); }
+    catch (error) { if (!storageError) throw error; }
     return code;
   }
   async worker(file: string, folder: string, clarification?: Clarification, resumeSessionId?: string, deadline = Date.now() + this.args.timeout * 1000, continuation = 0, blocker?: BlockerReview) {
     const budget = Math.max(0.001, (deadline - Date.now()) / 1000);
+    const reserve = handoffReserve(this.args.timeout);
+    const targetAt = new Date(deadline - (this.args.timeout - completionTargetSeconds) * 1000);
+    const completionTarget = this.args.timeout - reserve >= completionTargetSeconds
+      ? ` Aim to finish and verify within 60 minutes of the start of this task run, by ${targetAt.toISOString()} (UTC).`
+      : '';
     const resultFile = path.join(folder, 'result.json');
     const prompt = fs.readFileSync(path.join(HERE, 'WORKER.md'), 'utf8') +
       `\nResult schema:\n${fs.readFileSync(path.join(HERE, 'result.schema.json'), 'utf8')}\n` +
       `\nProject: ${this.root}\nWorkflow: ${this.workflow}\nClient: ${this.args.worker ? 'custom' : this.args.client}\nTask file: ${file}\nResult file: ${resultFile}\n` +
-      `\nWorker budget: ${budget} seconds. Deadline (UTC): ${new Date(deadline).toISOString()}. Reserve the final ${handoffReserve(this.args.timeout)} seconds for the handoff. Continue through all remaining task acceptance. Check ${path.join(folder, 'handoff-request.json')} before starting each new operation; when present, checkpoint and return promptly.\n` +
+      `\nWorker budget: ${budget} seconds. Deadline (UTC): ${new Date(deadline).toISOString()}. Reserve the final ${reserve} seconds for the handoff.${completionTarget} Continue through all remaining task acceptance. Check ${path.join(folder, 'handoff-request.json')} before starting each new operation; when present, checkpoint and return promptly.\n` +
       (continuation && !blocker ? `\nContinuation ${continuation}/2 within the current charged task run. The earlier pending return was before the deadline. Continue from its exact next edit; do not repeat unchanged discovery or checks. The original deadline and task counter still apply. A context-labelled handoff starts fresh context; ordinary checkpoints resume the same session when supported.\n` : '') +
       (resumeSessionId && !clarification ? '\nContinue the same task session from the next required edit. Reuse unchanged context and compatible passing evidence.\n' : '') +
       `\nTask run: ${taskRuns(file)} of ${Math.min(this.args.maxTaskRuns, this.args.blockAfterRuns)} allowed runs. An unfinished task at the limit becomes blocked; independent work continues. Preserve the runner-owned taskmd-runner runs comment in Progress.\n` +
@@ -271,6 +292,14 @@ export class Runner {
       TASKMD_RESULT_FILE: resultFile, TASKMD_ROUND_DIR: folder, ASSIGN_OFFLINE_TESTS: '1',
       TASKMD_HANDOFF_AT: String(handoffAt), TASKMD_HANDOFF_MESSAGE: handoffMessage };
     const log = fs.createWriteStream(path.join(folder, 'worker.jsonl'));
+    const workerAbort = new AbortController();
+    const abortWorker = () => workerAbort.abort();
+    this.signal?.addEventListener('abort', abortWorker, { once: true });
+    if (this.signal?.aborted) abortWorker();
+    const logFinished = finished(log).catch(error => {
+      abortWorker();
+      return new StorageFailure(`Worker log write failed: ${error.message}`, { cause: error });
+    });
     const started = performance.now(); let usage: Usage | Record<string, number> | null = null;
     let providerThreadId: string | null = null;
     let handoffRequested = false, handoffError: string | undefined;
@@ -285,14 +314,15 @@ export class Runner {
     }, Math.max(0, handoffAt - Date.now()));
     try {
       if (this.args.worker) {
-        try { await command(this.args.worker[0], this.args.worker.slice(1), { cwd, env, input: prompt, signal: this.signal, timeoutMs: Math.max(1, deadline - Date.now()), log }); }
+        try { await command(this.args.worker[0], this.args.worker.slice(1), { cwd, env, input: prompt, signal: workerAbort.signal, timeoutMs: Math.max(1, deadline - Date.now()), log }); }
         catch (error) { const message = error instanceof Error ? error.message : String(error); throw new WorkerFailure(message, message.startsWith('Command timed out:') ? 'timeout' : 'worker_error', metrics()); }
       } else {
+        let protocolLogError: StorageFailure | undefined;
         const result = await runAgent({ client: this.args.client, prompt, workdir: cwd,
           persistSession: this.args.client === 'codex' && extraEnv.TASKMD_WORKER_ROLE === 'task', resumeSessionId,
           model: this.args.model, effort: this.args.effort,
           executable: this.args.client === 'codex' ? path.join(HERE, 'bin/codex-worker.js') : this.args.executable,
-          permissions: this.args.permissions, timeoutMs: Math.max(1, deadline - Date.now()), signal: this.signal,
+          permissions: this.args.permissions, timeoutMs: Math.max(1, deadline - Date.now()), signal: workerAbort.signal,
           // Tool output is one JSON event; its limit is separate from retained output tails.
           maxEventBytes: 16 * 1024 * 1024,
           // Preserve Codex's original workspace-write/never policy via a small executable wrapper.
@@ -301,7 +331,14 @@ export class Runner {
             : { TASKMD_CODEX_ISOLATED_HOME: undefined }),
             TASKMD_CODEX_SANDBOX: this.args.sandbox, TASKMD_CODEX_EXECUTABLE: this.args.executable || 'codex', TASKMD_RESULT_SCHEMA: path.join(HERE, 'result.schema.json') },
           onOutput: chunk => { log.write(chunk); },
+          onEvent: event => {
+            if (this.args.client === 'codex' && event.type === 'error' && event.message.startsWith('Codex protocol log write failed:')) {
+              protocolLogError = new StorageFailure(event.message);
+              abortWorker();
+            }
+          },
         });
+        if (protocolLogError) throw protocolLogError;
         jsonFile(path.join(folder, 'agent.json'), { client: result.client, status: result.status, code: result.code, signal: result.signal,
           usage: result.usage, providerThreadId: result.providerThreadId, error: result.error, truncated: result.truncated });
         usage = result.usage; providerThreadId = result.providerThreadId;
@@ -314,7 +351,13 @@ export class Runner {
           fs.writeFileSync(resultFile, fenced ? fenced[1] : raw);
         }
       }
-    } finally { clearTimeout(handoffTimer); log.end(); await finished(log); }
+    } finally {
+      clearTimeout(handoffTimer);
+      this.signal?.removeEventListener('abort', abortWorker);
+      log.end();
+      const logError = await logFinished;
+      if (logError) throw logError;
+    }
     if (this.args.worker) {
       const totals: Record<string, number> = {};
       for (const line of fs.readFileSync(path.join(folder, 'worker.jsonl'), 'utf8').split('\n')) {
@@ -342,10 +385,10 @@ export class Runner {
       await this.control.open();
       release = await acquireTaskLock(this.tasks, error => { this.lockError = error.message; lease.abort(); }, this.args.gitSync || this.args.gitIntegrationBranch ? [] : this.taskPrefixes);
       fs.mkdirSync(this.runDir, { recursive: true });
+      void flushMonitor(1).catch(() => {});
       this.monitor = attachMonitor({ id: this.control.status.run_id.replaceAll('-', '').slice(0, 24), roadmap: this.root,
         createdAt: now(), readyAt: now(), processState: 'running', roadmapState: 'in_progress', pid: process.pid });
       this.monitorEvent('runner.started');
-      if (this.monitor) void flushMonitor(1).catch(() => {});
       // Check adapter controls before claiming any task.
       if (!this.args.worker) buildRunnerInvocation({ client: this.args.client, prompt: 'preflight', workdir: this.root, model: this.args.model, effort: this.args.effort, permissions: this.args.permissions });
       if (this.args.gitSync || this.args.gitIntegrationBranch) {
@@ -361,13 +404,17 @@ export class Runner {
       while (!this.args.rounds || this.rows.length < this.args.rounds) {
         this.control.update({ task: null, round: this.rows.length });
         await this.controlCheckpoint();
-        if (this.signal?.aborted) return this.finish(this.lockError ? 'lock_lost' : 'interrupted', this.lockError ? 1 : 130);
+        if (this.signal?.aborted) return await this.finish(this.lockError ? 'lock_lost' : 'interrupted', this.lockError ? 1 : 130);
         if (this.gitSync) {
           try {
             await this.gitSync.before(this.rows.length + 1);
             if (fs.readFileSync(this.config, 'utf8') !== this.configText) throw new Error('Git sync changed the runner configuration; restart with the updated configuration');
             await this.cli('validate');
-          } catch (error) { this.gitSync.failed(error); return await this.finish(this.lockError ? 'lock_lost' : this.signal?.aborted ? 'interrupted' : 'git_sync_error', this.lockError ? 1 : this.signal?.aborted ? 130 : 1); }
+          } catch (error) {
+            if (isStorageFailure(error)) throw error;
+            this.gitSync.failed(error);
+            return await this.finish(this.lockError ? 'lock_lost' : this.signal?.aborted ? 'interrupted' : 'git_sync_error', this.lockError ? 1 : this.signal?.aborted ? 130 : 1);
+          }
         }
         const selected = await this.nextTasks();
         if (!selected.length) {
@@ -526,6 +573,11 @@ export class Runner {
             break;
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
+            if (isStorageFailure(error)) {
+              Object.assign(row, { status: 'interrupted', recovery_reason: 'storage_error', error: message, ended_at: now() });
+              try { atomicJson(path.join(folder, 'receipt.json'), row); } catch {}
+              return await this.finish('storage_error', 1, error);
+            }
             if (error instanceof InvalidResponse || error instanceof WorkerFailure) Object.assign(row, error.metrics);
             if (row.attempts) {
               let attempt = row.attempts.at(-1);
@@ -593,6 +645,7 @@ export class Runner {
       }
       return await this.finish('round_limit', 0);
     } catch (error) {
+      if (isStorageFailure(error)) return await this.finish('storage_error', 1, error);
       if (this.control?.status.state !== 'exited' && this.control?.status.revision) this.control.update({ state: 'exited',
         reason: this.lockError ? 'lock_lost' : this.signal?.aborted ? 'interrupted' : 'runner_error',
         exit_code: this.lockError ? 1 : this.signal?.aborted ? 130 : 1, ended_at: now() });
@@ -604,7 +657,14 @@ export class Runner {
     } finally {
       originalSignal?.removeEventListener('abort', stop);
       try { await this.control?.close(); }
-      finally { if (release) { try { await release(); } catch (error) { if (!this.lockError) throw error; } } }
+      finally {
+        if (release) {
+          try { await release(); }
+          catch (error) {
+            if (!this.lockError && !(this.control?.status.reason === 'storage_error' && isStorageFailure(error))) throw error;
+          }
+        }
+      }
     }
   }
 }

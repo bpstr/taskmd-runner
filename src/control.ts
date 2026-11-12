@@ -6,6 +6,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { lock } from 'proper-lockfile';
 import { atomicJson, privateDir, registryRoot } from './monitor-state.js';
+import { queueRecoveredMonitor } from './monitor.js';
 
 export type ControlAction = 'pause' | 'resume' | 'stop';
 export interface RunStatus {
@@ -33,6 +34,45 @@ function readRecord(id: string): RunRecord {
   try { return JSON.parse(fs.readFileSync(recordFile(id), 'utf8')); }
   catch { throw new Error('Run not found'); }
 }
+function savedRuns(project?: string) {
+  if (!fs.existsSync(records())) return [];
+  return fs.readdirSync(records()).flatMap(name => {
+    const id = name.slice(0, -5);
+    if (!name.endsWith('.json') || !validId(id)) return [];
+    try {
+      const record = readRecord(id);
+      return record.run_id === id && (!project || record.project === project) ? [record] : [];
+    } catch { return []; }
+  });
+}
+function controllerGone(pid: number) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return false; }
+  catch (error) { return (error as NodeJS.ErrnoException).code === 'ESRCH'; }
+}
+function reconcileRecord(record: RunRecord): RunRecord {
+  if (record.state !== 'exited') {
+    if (!controllerGone(record.pid)) return record;
+    // The controller may have persisted its own terminal status before exiting.
+    record = readRecord(record.run_id);
+    if (record.state !== 'exited') {
+      let reason = 'controller_lost', endedAt = new Date().toISOString();
+      try {
+        const summary = JSON.parse(fs.readFileSync(path.join(record.run_dir, 'summary.json'), 'utf8'));
+        if (summary.reason === 'storage_error') { reason = summary.reason; endedAt = summary.ended_at || endedAt; }
+      } catch {}
+      record = { ...publicStatus(record), state: 'exited', revision: record.revision + 1,
+        reason, ended_at: endedAt, exit_code: 1, task: null };
+      try { atomicJson(recordFile(record.run_id), record); } catch {}
+    }
+  }
+  if (record.reason === 'controller_lost' || record.reason === 'storage_error') {
+    queueRecoveredMonitor({ id: record.run_id.replaceAll('-', '').slice(0, 24), roadmap: record.project,
+      createdAt: record.started_at, endedAt: record.ended_at, pid: record.pid, exitCode: record.exit_code,
+      reason: record.reason, processState: 'exited', roadmapState: 'stopped' });
+  }
+  return record;
+}
 export async function requestRun(record: { run_id: string; endpoint?: string; token?: string }, action: 'status' | ControlAction): Promise<RunStatus> {
   if (!validId(record.run_id) || !record.token || !record.endpoint ||
       !new RegExp(`^http://127\\.0\\.0\\.1:[0-9]+/${record.run_id}$`).test(record.endpoint)) throw new Error('Run controller is unavailable');
@@ -47,9 +87,12 @@ export async function requestRun(record: { run_id: string; endpoint?: string; to
 }
 export async function runStatus(id: string): Promise<RunStatus> {
   const record = readRecord(id);
-  if (record.state === 'exited') return publicStatus(record);
+  if (record.state === 'exited') return publicStatus(reconcileRecord(record));
   try { return await requestRun(record, 'status'); }
-  catch { return { ...publicStatus(record), state: 'unreachable' }; }
+  catch {
+    const recovered = publicStatus(reconcileRecord(record));
+    return recovered.state === 'exited' ? recovered : { ...recovered, state: 'unreachable' };
+  }
 }
 export async function controlRun(id: string, action: ControlAction) {
   const record = readRecord(id);
@@ -58,14 +101,15 @@ export async function controlRun(id: string, action: ControlAction) {
 }
 export async function listRuns(project?: string, offset = 0, limit = 20, includeExited = false) {
   const root = project ? fs.realpathSync(path.resolve(project)) : undefined;
-  if (!fs.existsSync(records())) return { runs: [], next_offset: null };
-  const ids = fs.readdirSync(records()).filter(name => validId(name.replace(/\.json$/, '')) && name.endsWith('.json'));
-  const matching = ids.map(name => readRecord(name.slice(0, -5)))
-    .filter(record => (!root || record.project === root) && (includeExited || record.state !== 'exited'))
+  const matching = savedRuns(root)
+    .filter(record => includeExited || record.state !== 'exited')
+    .map(reconcileRecord)
+    .filter(record => includeExited || record.state !== 'exited')
     .sort((a, b) => b.started_at.localeCompare(a.started_at) || a.run_id.localeCompare(b.run_id));
   const page = matching.slice(offset, offset + limit);
-  const runs = await Promise.all(page.map(record => runStatus(record.run_id)));
-  return { runs, next_offset: offset + page.length < matching.length ? offset + page.length : null };
+  const runs = await Promise.all(page.map(record => record.state === 'exited' ? publicStatus(record) : runStatus(record.run_id)));
+  return { runs: includeExited ? runs : runs.filter(record => record.state !== 'exited'),
+    next_offset: offset + page.length < matching.length ? offset + page.length : null };
 }
 
 /** One authenticated loopback endpoint per invocation; never signal a saved PID. */
@@ -108,6 +152,9 @@ export class RunControl {
         onCompromised: () => { this.onChange('stop'); this.wake?.(); } });
     } catch { throw new Error('Another runner owns this workspace and lane'); }
     try {
+      for (const record of savedRuns(this.status.project)) {
+        if (record.lane === this.status.lane) reconcileRecord(record);
+      }
       await new Promise<void>((resolve, reject) => {
         this.server.once('error', reject); this.server.listen(0, '127.0.0.1', resolve);
       });

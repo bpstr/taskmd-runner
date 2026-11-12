@@ -15,11 +15,11 @@ Select pending taskmd work, claim it, run one worker, validate and repeat.
   --client NAME          ${CLIENT_NAMES.join(', ')} (default codex)
   --rounds N             Maximum worker rounds; 0 drains ready work (default 0)
   --max-task-runs N      Maximum runs per task across restarts (default 5)
-  --block-after-runs N   Block unfinished tasks after N runs (default 3)
+  --block-after-runs N   Block unfinished tasks after N runs (default 5)
   --review-blockers     Review a worker blocker once within the current round
   --filter EXPR          Repeatable taskmd filter
   --task-prefix PATH     Allow a task-directory subtree; repeat for alternatives
-  --timeout SECONDS      Per-worker timeout (default 7200; 2 hours)
+  --timeout SECONDS      Hard timeout per task run (default 5400 seconds, 90 minutes)
   --model NAME           Codex default gpt-6.1-sol; other clients inherit configuration
   --effort LEVEL         Codex default medium; other clients inherit configuration
   --permissions POLICY  default or bypass (explicit unattended permission opt-in)
@@ -43,7 +43,7 @@ Select pending taskmd work, claim it, run one worker, validate and repeat.
   monitor test|status|enable|disable|flush [--json]   Roadmap Monitor reporting
 `;
 export function parseArgs(argv: string[]): Options {
-  const options: Options = { project: '', taskmd: 'taskmd', filter: [], rounds: 0, maxTaskRuns: 5, blockAfterRuns: 3, timeout: 7200, client: 'codex', sandbox: 'workspace-write', permissions: 'default', notify: 'attention', notifyOn: [], gitSync: false, gitRepo: [], gitConflicts: 'skip' };
+  const options: Options = { project: '', taskmd: 'taskmd', filter: [], rounds: 0, maxTaskRuns: 5, blockAfterRuns: 5, timeout: 5400, client: 'codex', sandbox: 'workspace-write', permissions: 'default', notify: 'attention', notifyOn: [], gitSync: false, gitRepo: [], gitConflicts: 'skip' };
   const strings: Record<string, keyof Options> = { '--project': 'project', '--config': 'config', '--task-dir': 'taskDir', '--state-dir': 'stateDir', '--taskmd': 'taskmd', '--model': 'model', '--effort': 'effort', '--client': 'client', '--sandbox': 'sandbox', '--executable': 'executable', '--permissions': 'permissions', '--notify': 'notify' };
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];

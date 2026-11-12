@@ -96,7 +96,14 @@ const parser = createOutputParser('codex-json', event => {
   } catch (error) { fail(error); }
 }, 16 * 1024 * 1024);
 child.stdout.on('data', chunk => { serverLog.write(chunk); parser.write(chunk); });
-serverLog.on('error', fail);
+serverLog.on('error', error => {
+  const failure = new Error(`Codex protocol log write failed: ${error.message}`);
+  if (!ended) fail(failure);
+  else if (!process.exitCode) {
+    process.exitCode = 1;
+    emit({ type: 'error', message: failure.message });
+  }
+});
 child.stdin.on('error', error => { if (error.code !== 'EPIPE') fail(error); });
 child.once('error', fail);
 child.once('close', code => {

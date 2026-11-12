@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
+import { createServer } from 'node:http';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { RunControl, controlRoot, runStatus, controlRun, requestRun, listRuns } from '../dist/control.js';
@@ -110,9 +111,80 @@ test('controllers separate workspace/lane identities, authenticate and report st
   assert.equal((await runStatus(b.status.run_id)).state, 'running');
   assert.equal((await runStatus(c.status.run_id)).state, 'running');
   await a.close(); assert.equal((await runStatus(a.status.run_id)).state, 'unreachable');
+  assert.ok((await listRuns(dir)).runs.some(run => run.run_id === a.status.run_id && run.state === 'unreachable'));
   await assert.rejects(controlRun(a.status.run_id, 'stop'));
   await assert.rejects(requestRun({ ...saved, endpoint: 'https://example.com' }, 'stop'), /unavailable/);
   await assert.rejects(runStatus('../unsafe'), /not found/);
+});
+
+test('a replacement lane reconciles a dead controller, reports a terminal Monitor state and resumes the checkpoint', async t => {
+  const dir = fixture(t), root = project(dir, 'recovered workspace');
+  const file = path.join(root, 'tasks', '001-task.md');
+  fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace('status: pending', 'status: in-progress') +
+    '\n## Progress\n\nPrepared checkpoint before disk exhaustion.\n\n<!-- taskmd-runner runs: 1 -->\n');
+  const child = spawn(process.execPath, ['-e', '']);
+  await new Promise((resolve, reject) => { child.once('error', reject); child.once('close', resolve); });
+  assert.throws(() => process.kill(child.pid, 0), { code: 'ESRCH' });
+
+  const id = randomUUID(), lane = 'recover', startedAt = new Date().toISOString();
+  const sourceId = id.replaceAll('-', '').slice(0, 24);
+  const records = path.join(controlRoot(), 'runs'), lanes = path.join(controlRoot(), 'lanes');
+  fs.mkdirSync(records, { recursive: true }); fs.mkdirSync(lanes, { recursive: true });
+  const recordFile = path.join(records, `${id}.json`);
+  fs.writeFileSync(recordFile, JSON.stringify({ run_id: id, project: root, lane, state: 'running', revision: 3,
+    pid: child.pid, run_dir: path.join(root, 'old-evidence'), started_at: startedAt, task: '001', round: 1 }));
+  const staleLane = path.join(lanes, createHash('sha256').update(root + '\0' + lane).digest('hex') + '.lock');
+  fs.mkdirSync(staleLane);
+  const expired = new Date(Date.now() - 60000); fs.utimesSync(staleLane, expired, expired);
+
+  const reports = [], installationId = randomUUID();
+  const server = createServer(async (req, res) => {
+    let body = '';
+    for await (const chunk of req) body += chunk;
+    reports.push(JSON.parse(body));
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ installation_id: installationId, protocol_versions: [1] }));
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  cleanup(t, () => new Promise(resolve => server.close(resolve)));
+  const stateDir = path.join(dir, 'monitor-state'), connectionId = randomUUID();
+  const monitor = path.join(stateDir, 'monitor'), outbox = path.join(monitor, 'outbox', connectionId);
+  fs.mkdirSync(outbox, { recursive: true });
+  fs.writeFileSync(path.join(monitor, 'config.json'), JSON.stringify({ version: 1, connectionId, installationId,
+    enabled: true, verified: true, endpoint: `http://127.0.0.1:${server.address().port}/ingest`,
+    apiKey: `rm_${'a'.repeat(16)}_${'b'.repeat(64)}` }));
+  const state = { version: 1, connectionId, installationId, sequence: 8, incarnationId: randomUUID(), events: [] };
+  const live = projectMonitor({ id: sourceId, roadmap: root, createdAt: startedAt, processState: 'running',
+    roadmapState: 'in_progress', role: 'worker', task: '001', iteration: 1, pid: child.pid }, state);
+  const spool = path.join(outbox, `${sourceId}.json`);
+  fs.writeFileSync(spool, JSON.stringify({ ...state, replayBase: live }));
+  fs.writeFileSync(spool + '.publisher', String(child.pid));
+
+  const client = await mcp(t, { TASKMD_MONITOR: 'on', TASKMD_MONITOR_STATE_DIR: stateDir });
+  const start = await client.tool('runner_start', { project: root, lane, rounds: 1, notify: 'off', worker: [process.execPath, fake] });
+  assert.equal(start.error, false, JSON.stringify(start.value));
+  cleanup(t, async () => {
+    if ((await runStatus(start.value.run_id)).state === 'exited') return;
+    await controlRun(start.value.run_id, 'stop');
+    await waitFor(() => runStatus(start.value.run_id), run => run.state === 'exited', 'replacement cleanup');
+  });
+  const finished = await waitFor(() => runStatus(start.value.run_id), run => run.state === 'exited', 'replacement exit');
+  const recovered = JSON.parse(fs.readFileSync(recordFile, 'utf8'));
+  assert.equal(recovered.state, 'exited'); assert.equal(recovered.reason, 'controller_lost');
+  assert.deepEqual((await client.tool('runner_list', { project: root })).value.runs, []);
+  assert.ok((await client.tool('runner_list', { project: root, include_exited: true })).value.runs.some(run => run.run_id === id));
+  const terminal = await waitFor(() => reports.find(report => report.source_run_id === sourceId && report.run.terminal), Boolean, 'terminal replay');
+  assert.equal(terminal.run.heartbeat_expected, false);
+  assert.equal(terminal.run.reason_code, 'controller_lost');
+  assert.ok(terminal.report_sequence > live.report_sequence);
+  assert.equal(terminal.process.incarnation_id, live.process.incarnation_id);
+  const summary = JSON.parse(fs.readFileSync(path.join(finished.run_dir, 'summary.json'), 'utf8'));
+  assert.deepEqual(summary.rounds.map(round => [round.task_id, round.task_run, round.status]), [['001', 2, 'completed']]);
+  const prompt = fs.readFileSync(path.join(finished.run_dir, '001-001', 'prompt.md'), 'utf8');
+  assert.match(prompt, /Aim to finish and verify within 60 minutes/);
+  assert.match(prompt, /Task run: 2 of 5 allowed runs/);
+  assert.match(fs.readFileSync(file, 'utf8'), /Prepared checkpoint before disk exhaustion/);
+  assert.match(fs.readFileSync(path.join(root, 'tasks', '002-task.md'), 'utf8'), /status: pending/);
 });
 
 test('pause checkpoints resume and stop without stopping neighboring lanes', async t => {
