@@ -80,5 +80,11 @@ if (process.argv.includes('exec')) {
   console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 10, output_tokens: 2 } }));
 } else if (process.argv.includes('--output-format')) {
   console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: JSON.stringify(result), usage: { input_tokens: 10, output_tokens: 2 } }));
+} else if (process.argv.includes('--standalone')) {
+  console.log(JSON.stringify({ type: 'text', sessionID: 'ses_fixture', part: { text: JSON.stringify(result) } }));
+  console.log(JSON.stringify({ type: 'step_finish', sessionID: 'ses_fixture', part: { tokens: { input: 10, output: 2 } } }));
+} else if (process.argv.includes('headless')) {
+  console.log(JSON.stringify({ type: 'status', phase: 'step_end', usage: { inputTokens: 10, outputTokens: 2 } }));
+  console.log(JSON.stringify({ type: 'final', sessionId: 'session-fixture', reason: { kind: 'completed' }, text: JSON.stringify(result) }));
 } else if (process.argv.some(arg => arg.startsWith('--single='))) console.log(JSON.stringify(result));
 else console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 10, output_tokens: 2 } }));
