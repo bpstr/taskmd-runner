@@ -942,3 +942,28 @@ and invalid-CLI controls (expected under two seconds). Then inspect the actual
 release tarball and its installed `--version`/`--help` entry points without
 starting a model worker. No new live client sessions or full-suite run are needed.
 The three affected publication checks passed: zero failures or skips (0.46 seconds).
+
+## Adapter 0.2.0 in TaskMD Runner 0.4.4
+
+The exact adapter pin affects client discovery, invocation, and receipt parsing.
+The focused runner selectors cover version and client controls, Codex defaults and
+session behavior, adapter output limits, provider failures, text fallback, and
+the published adapter contract. Thirteen existing checks and two new prepared
+checks passed. The new checks use the normal runner command and each complete
+three rounds with a structured stdout receipt and a provider session ID. The
+earlier 0.4.3 evidence still applies to queue, Git, and monitoring code outside
+these paths. The selected tests took about 43 seconds in total.
+
+The normal runner command also completed one disposable task each with OpenCode
+v2.3.0 and DeepSeek Harness v0.2.2-rc.3. Both native CLIs received prepared SSE
+responses from loopback servers with external network access denied. A fixture
+launcher added the required task checkbox and documentation note before starting
+each CLI. The runner selected the correct workspace, parsed the native JSONL
+receipt, captured usage and the provider session ID, and marked the task
+completed. The checks sent no external inference requests. The release work
+included preparing the loopback transport and diagnosing an auxiliary OpenCode
+title request separately from the task prompt.
+
+Release evidence, including the focused logs and native harness, is stored under
+`.taskmd-runner/release-0.4.4/`. The release tarball is checked in a disposable
+installation for CLI help, version, and MCP discovery before publication.

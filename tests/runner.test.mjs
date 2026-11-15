@@ -785,13 +785,15 @@ test('task file references keep large scope and history out of continuation prom
   }
   assert.equal(new Set(prompts.map(x => x.split('\nResult file:')[0])).size, 1);
 });
-for (const client of ['codex', 'claude', 'grok']) {
+for (const client of ['codex', 'claude', 'grok', 'opencode', 'deepseek']) {
   test(`published adapter contract: ${client}, three-round cap with prepared process`, async t => {
     const root = fixture(t); for (let n = 1; n <= 4; n++) task(root, String(n).padStart(3, '0'));
-    const r = await run(root, 'completed', ['--client', client, '--rounds', '3'], true);
+    const usesStructuredReceipt = client === 'opencode' || client === 'deepseek';
+    const r = await run(root, usesStructuredReceipt ? 'text-only' : 'completed', ['--client', client, '--rounds', '3'], true);
     assert.equal(r.code, 0, r.stderr); assert.equal(r.summary.reason, 'round_limit'); assert.equal(r.summary.rounds.length, 3);
     assert.ok(r.summary.rounds.every(row => row.status === 'completed' && row.client === client));
     if (client !== 'grok') assert.equal(r.summary.rounds[0].usage.inputTokens, 10);
+    if (usesStructuredReceipt) assert.equal(r.summary.rounds[0].provider_thread_id, client === 'opencode' ? 'ses_fixture' : 'session-fixture');
     if (client === 'codex') {
       const folder = path.dirname(r.events.find(x => x.summary).summary);
       const messages = fs.readFileSync(path.join(folder, '001-001/rpc.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);

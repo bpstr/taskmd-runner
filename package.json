@@ -1,6 +1,6 @@
 {
   "name": "@bpstr/taskmd-runner",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "Sequential taskmd execution through coding-agent CLI clients",
   "type": "module",
   "bin": {
@@ -26,7 +26,7 @@
     "prepack": "npm run build"
   },
   "dependencies": {
-    "@bpstr/agent-adapter": "0.1.0",
+    "@bpstr/agent-adapter": "0.2.0",
     "@modelcontextprotocol/server": "2.4.0",
     "proper-lockfile": "4.1.2",
     "yaml": "2.9.1",

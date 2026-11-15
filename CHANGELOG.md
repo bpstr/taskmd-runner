@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.4 — 2026-11-15
+
+- Add `opencode` and `deepseek` as built-in clients through `@bpstr/agent-adapter` 0.2.0.
+
 ## 0.4.3 — 2026-11-12
 
 - Resume eligible in-progress tasks before selecting pending work. Retain

@@ -5,7 +5,7 @@ validate the result, update the task Markdown and repeat. It exits when the sele
 queue has no ready work. It never polls an empty queue.
 
 Requires Node.js 20+, taskmd 0.8.0 and a configured coding-agent CLI. Supports
-Codex, Claude, Gemini, Grok, Kimi and Muse through the public
+Codex, Claude, Gemini, Grok, Kimi, Muse, OpenCode CLI and DeepSeek Harness through the public
 [@bpstr/agent-adapter](https://www.npmjs.com/package/@bpstr/agent-adapter) package.
 macOS and Linux are supported. The runner and its npm dependencies use Node.js;
 installation requires no Python, native addon or C++ build toolchain. Optional
@@ -18,6 +18,13 @@ npm install -g @bpstr/taskmd-runner
 taskmd-runner --version
 taskmd-runner --project /path/to/project --client claude --rounds 3
 ```
+
+Choose `--client opencode` for OpenCode v2.3 or `--client deepseek` for DeepSeek
+Harness. Install `opencode` or `dsh` on `PATH`, or pass `--executable`.
+OpenCode uses the selected project's configuration and accepts `--model provider/model`.
+DeepSeek uses the `dsh` headless profile's model and inherits `DEEPSEEK_API_KEY`
+from the environment that launched the runner. DeepSeek Harness v0.2.2-rc.3
+requires Node.js 24.9 or later.
 
 From a source checkout:
 
