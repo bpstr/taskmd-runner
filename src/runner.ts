@@ -200,7 +200,7 @@ export class Runner {
         const merged = readTask(file), journal = merged.body.split('\n## Progress').slice(1).join('\n## Progress');
         if (!isDeepStrictEqual(contract(file), before) || merged.meta.status !== (row.task_status ?? row.status) || taskRuns(file) !== row.task_run || !journal.includes(acceptedJournal) || ((row.status === 'completed' || row.status === 'in-review') && checks(file)[1])) throw new Error('Git integration changed the accepted task contract, status or handoff');
         await this.cli('validate');
-      });
+      }, file);
     } catch (error) {
       if (isStorageFailure(error)) throw error;
       this.gitSync.failed(error); row.git_sync = 'failed'; row.git_error = this.gitSync.error;
@@ -451,7 +451,7 @@ export class Runner {
               await this.gitSync.after(this.rows.length + 1, id, 'blocked', async () => {
                 if (!isDeepStrictEqual(contract(file), before) || readTask(file).meta.status !== 'blocked' || taskRuns(file) !== previousRuns || !readTask(file).body.includes(acceptedJournal)) throw new Error('Git integration changed the task run limit handoff');
                 await this.cli('validate');
-              });
+              }, file);
             } catch (error) {
               this.gitSync.failed(error);
               return await this.finish(this.lockError ? 'lock_lost' : this.signal?.aborted ? 'interrupted' : 'git_sync_error', this.lockError ? 1 : this.signal?.aborted ? 130 : 1);
