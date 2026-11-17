@@ -110,14 +110,13 @@ for (const scenario of [
       report.attention.length === 1 && report.attention[0].task_id === '002'));
     assert.deepEqual(final.attention.map(issue => issue.task_id), ['002']);
     assert.deepEqual(r.summary.blocked_tasks.map(blocker => blocker.task_id), ['001', '002']);
-  }
-  assert.ok(!JSON.stringify(envelopes).includes(root)); assert.ok(!JSON.stringify(envelopes).includes(key));
-  if (scenario.mode === 'blocked-first') {
+  } else if (scenario.mode === 'blocked-first') {
     assert.deepEqual(r.summary.rounds.map(row => row.task_id), ['001', '002']);
     assert.deepEqual(final.attention.map(item => item.task_id), ['001']);
   } else {
     assert.deepEqual(final.attention, []);
   }
+  assert.ok(!JSON.stringify(envelopes).includes(root)); assert.ok(!JSON.stringify(envelopes).includes(key));
   if (process.env.MONITOR_REPORT_CAPTURE) fs.writeFileSync(path.join(process.env.MONITOR_REPORT_CAPTURE, scenario.mode + (scenario.options.length ? '-cap' : '') + '.json'), JSON.stringify(envelopes));
 });
 test('offline monitor delivery retains terminal replay while prepared work succeeds', async t => {

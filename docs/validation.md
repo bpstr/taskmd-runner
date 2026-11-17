@@ -1,5 +1,14 @@
 # Runner validation
 
+## Consolidate the runner recovery branches
+
+`npm test` covers the combined Git, worker, control, accounting and Monitor
+changes with prepared workers and local transports. The build passed and 169
+of 170 tests passed in 105 seconds. The remaining Monitor fixture made two
+contradictory assertions about the unrelated blocker. The five Monitor
+scenarios passed after correcting the fixture. The correction only changes
+the test assertions, so the other passing results carry forward.
+
 ## Concurrent commits on the integration branch
 
 Build with `npm run build` and run `node --test tests/git-sync.test.mjs`.
