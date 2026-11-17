@@ -13,6 +13,7 @@ import { parseArgs } from '../dist/cli.js';
 import { Runner, pendingReason } from '../dist/runner.js';
 import { Notifications } from '../dist/notifications.js';
 import { command } from '../dist/process.js';
+import { writeDiagnostics } from '../dist/diagnostics.js';
 process.env.TASKMD_MONITOR = 'off';
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const fake = path.join(ROOT, 'tests/fake-worker.mjs');
@@ -35,6 +36,24 @@ function task(root, id, { priority = 'medium', dependencies = [], status = 'pend
   fs.writeFileSync(file, '---\n' + stringify({ id, title: 'Task ' + id, status, priority, dependencies }) + '---\n# Task\n\n- [ ] Deliver the fixture\n');
   return file;
 }
+test('diagnostics count replayed events once and omit tool content', async t => {
+  const root = fixture(t);
+  const command = (id, exitCode) => ({ method: 'item/completed', params: {
+    threadId: 'prepared', item: { id, type: 'commandExecution', command: 'private command',
+      aggregatedOutput: 'private output', exitCode },
+  } });
+  fs.writeFileSync(path.join(root, 'worker.jsonl'),
+    [command('a', 0), command('a', 0), command('b', 1)].map(event => JSON.stringify(event)).join('\n') + '\npartial');
+  const report = await writeDiagnostics(root, [{ task_id: '001', status: 'blocked', attempts: [{ folder: root }] }], { client: 'codex' });
+  const output = fs.readFileSync(report, 'utf8');
+  assert.doesNotMatch(output, /private (command|output)/);
+  const { totals } = JSON.parse(output);
+  assert.equal(totals.tool_calls, 2);
+  assert.equal(totals.unsuccessful_calls, 1);
+  assert.equal(totals.exact_repeats, 1);
+  assert.equal(totals.malformed_lines, 1);
+  assert.equal(totals.dispatches_with_usage, 0);
+});
 async function run(root, mode = 'completed', options = [], adapter = false, env = {}) {
   const args = [path.join(ROOT, 'bin/taskmd-runner.js'), '--project', root, '--notify', 'off', '--timeout', '10', ...options];
   if (adapter) args.push('--executable', fake);
@@ -49,8 +68,9 @@ async function run(root, mode = 'completed', options = [], adapter = false, env 
 }
 for (const scenario of [
   { name: 'drained queue', mode: 'completed', options: [], outcome: 'completed', code: 0 },
-  { name: 'round cap', mode: 'completed', options: ['--rounds', '1'], outcome: 'needs_attention', code: 0 },
+  { name: 'round cap', mode: 'completed', options: ['--rounds', '1'], outcome: 'completed', code: 0 },
   { name: 'blocked task followed by independent work', mode: 'blocked-first', options: [], outcome: 'needs_attention', code: 2 },
+  { name: 'round cap with a blocked task', mode: 'blocked-first', options: ['--rounds', '2'], outcome: 'needs_attention', code: 0 },
 ]) test(`monitor reports ${scenario.name} through prepared workers`, async t => {
   const root = fixture(t); task(root, '001', { priority: 'critical' }); task(root, '002');
   const reports = [], key = `rm_${'a'.repeat(16)}_${'b'.repeat(64)}`;
@@ -68,6 +88,11 @@ for (const scenario of [
   const envelopes = reports.filter(report => report.kind !== 'probe'), final = envelopes.at(-1);
   assert.equal(final.run.terminal, true); assert.equal(final.run.heartbeat_expected, false);
   assert.equal(final.run.terminal_outcome, scenario.outcome);
+  if (scenario.options.length) {
+    assert.equal(r.summary.reason, 'round_limit');
+    assert.equal(final.run.reason_code, 'round_limit');
+    assert.equal(final.run.roadmap_state, 'stopped');
+  }
   assert.match(envelopes[0].run.roadmap_label, /^Taskmd · /);
   assert.equal(final.last_update?.outcome, 'completed');
   assert.ok(final.run.last_progress_at);
@@ -76,7 +101,9 @@ for (const scenario of [
   assert.ok(!JSON.stringify(envelopes).includes(root)); assert.ok(!JSON.stringify(envelopes).includes(key));
   if (scenario.mode === 'blocked-first') {
     assert.deepEqual(r.summary.rounds.map(row => row.task_id), ['001', '002']);
-    assert.equal(final.attention[0].task_id, '001');
+    assert.deepEqual(final.attention.map(item => item.task_id), ['001']);
+  } else {
+    assert.deepEqual(final.attention, []);
   }
   if (process.env.MONITOR_REPORT_CAPTURE) fs.writeFileSync(path.join(process.env.MONITOR_REPORT_CAPTURE, scenario.mode + (scenario.options.length ? '-cap' : '') + '.json'), JSON.stringify(envelopes));
 });
@@ -133,13 +160,21 @@ test('empty queue never launches worker', async t => {
 test('adapter accepts large tool events while bounding retained output', async t => {
   for (const client of ['codex', 'claude']) {
     const root = fixture(t), file = task(root, '001');
-    const r = await run(root, 'large-event', ['--client', client], true);
+    const r = await run(root, 'large-event', ['--client', client, '--diagnose'], true);
     assert.equal(r.code, 0, r.stderr); assert.equal(r.summary.reason, 'empty');
     assert.equal(readTask(file).meta.status, 'completed');
     const folder = path.join(path.dirname(r.events.find(event => event.summary).summary), '001-001');
     const agent = JSON.parse(fs.readFileSync(path.join(folder, 'agent.json'), 'utf8'));
     assert.equal(agent.status, 'success'); assert.equal(agent.error, null);
     assert.equal(agent.truncated.stdout, true);
+    const diagnostics = JSON.parse(fs.readFileSync(r.summary.diagnostics, 'utf8'));
+    if (client === 'codex') {
+      assert.equal(diagnostics.totals.shell_calls, 1);
+      assert.ok(diagnostics.totals.shell_output_bytes > 1024 * 1024);
+      assert.equal(diagnostics.totals.first_eight_shell_output_bytes, diagnostics.totals.shell_output_bytes);
+    } else {
+      assert.equal(diagnostics.totals.dispatches_with_tool_logs, 0);
+    }
     assert.equal(agent.usage.inputTokens, 10);
     assert.ok(fs.statSync(path.join(folder, 'worker.jsonl')).size > 2 * 1024 * 1024);
   }
@@ -168,15 +203,15 @@ test('Codex timeout retries within the task budget then continues independent wo
   const independent = task(root, '003');
   const r = await run(root, 'timeout-first', ['--timeout', '1'], true);
   assert.equal(r.code, 2, r.stderr); assert.equal(r.summary.reason, 'no_ready_tasks');
-  assert.deepEqual(r.summary.rounds.map(row => row.task_id), ['001', '001', '001', '003']);
-  assert.equal(readTask(file).meta.status, 'blocked'); assert.equal(taskRuns(file), 3);
+  assert.deepEqual(r.summary.rounds.map(row => row.task_id), ['001', '001', '001', '001', '001', '003']);
+  assert.equal(readTask(file).meta.status, 'blocked'); assert.equal(taskRuns(file), 5);
   assert.equal(readTask(dependent).meta.status, 'pending');
   assert.equal(readTask(independent).meta.status, 'completed');
   assert.match(r.summary.rounds[0].error, /codex timed-out \(124\)/);
   assert.equal(r.summary.rounds[0].recovery_reason, 'timeout');
   assert.equal(r.summary.rounds[1].session_resumed, true);
-  assert.equal(r.summary.rounds[2].blocked_reason, 'task_run_limit');
-  assert.equal(r.summary.rounds[3].session_resumed, false);
+  assert.equal(r.summary.rounds[4].blocked_reason, 'task_run_limit');
+  assert.equal(r.summary.rounds[5].session_resumed, false);
   assert.equal(r.events.find(event => event.event === 'task_blocked').next_action, 'select_next_task');
   const folder = path.join(path.dirname(r.events.find(event => event.summary).summary), '001-001');
   const agent = JSON.parse(fs.readFileSync(path.join(folder, 'agent.json'), 'utf8'));
@@ -201,6 +236,7 @@ test('Codex receives a deadline steer and resumes its graceful checkpoint', asyn
   assert.match(steer.input[0].text, /record a durable Progress checkpoint/);
   assert.equal(r.summary.rounds[0].handoff_requested, true);
   assert.ok(fs.existsSync(path.join(folder, 'handoff-request.json')));
+  assert.doesNotMatch(fs.readFileSync(path.join(folder, 'prompt.md'), 'utf8'), /Aim to finish and verify within 60 minutes/);
   assert.match(fs.readFileSync(path.join(folder, 'worker.jsonl'), 'utf8'), /handoff.delivered/);
   assert.equal(JSON.parse(fs.readFileSync(path.join(folder, 'agent.json'), 'utf8')).status, 'success');
 });
@@ -278,7 +314,7 @@ test('invalid response clarification is bounded and moves to independent work af
   assert.equal(r.summary.blocked_tasks[0].reason, 'invalid_response');
 });
 test('invalid response clarification respects invocation and task run budgets', async t => {
-  for (const [options, previous, expectedReason] of [[['--rounds', '1'], 0, 'round_limit'], [['--max-task-runs', '1'], 0, 'no_ready_tasks'], [[], 2, 'no_ready_tasks']]) {
+  for (const [options, previous, expectedReason] of [[['--rounds', '1'], 0, 'round_limit'], [['--max-task-runs', '1'], 0, 'no_ready_tasks'], [[], 4, 'no_ready_tasks']]) {
     const root = fixture(t), file = task(root, '001'); if (previous) setTaskRuns(file, previous);
     const r = await run(root, 'repairable', options);
     assert.equal(r.summary.reason, expectedReason, r.stderr); assert.equal(r.summary.rounds.length, 1);
@@ -314,10 +350,10 @@ test('pending without checked progress retries within budget then continues inde
   const dependent = task(root, '002', { dependencies: ['001'] }); task(root, '003');
   const r = await run(root, 'pending-first');
   assert.equal(r.code, 2, r.stderr); assert.equal(r.summary.reason, 'no_ready_tasks');
-  assert.deepEqual(r.summary.rounds.map(row => row.task_id), ['001', '001', '001', '003']);
+  assert.deepEqual(r.summary.rounds.map(row => row.task_id), ['001', '001', '001', '001', '001', '003']);
   assert.equal(readTask(file).meta.status, 'blocked'); assert.equal(readTask(dependent).meta.status, 'pending');
   assert.equal(r.summary.rounds[0].recovery_reason, 'no_progress');
-  assert.equal(r.summary.rounds[2].blocked_reason, 'task_run_limit');
+  assert.equal(r.summary.rounds[4].blocked_reason, 'task_run_limit');
   assert.equal(r.events.find(event => event.event === 'task_blocked').next_action, 'select_next_task');
 });
 for (const mode of ['false-completion', 'scope', 'status', 'malformed', 'exit', 'timeout']) {
@@ -326,7 +362,7 @@ for (const mode of ['false-completion', 'scope', 'status', 'malformed', 'exit', 
     const dependent = task(root, '002', { dependencies: ['001'] }); task(root, '003');
     const r = await run(root, mode + '-first', mode === 'timeout' ? ['--timeout', '0.1'] : []);
     assert.equal(r.code, 2, r.stderr); assert.equal(r.summary.reason, 'no_ready_tasks');
-    const attempts = ['false-completion', 'malformed'].includes(mode) ? 2 : ['exit', 'timeout'].includes(mode) ? 3 : 1;
+    const attempts = ['false-completion', 'malformed'].includes(mode) ? 2 : ['exit', 'timeout'].includes(mode) ? 5 : 1;
     assert.deepEqual(r.summary.rounds.map(row => row.task_id), [...Array(attempts).fill('001'), '003']);
     assert.equal(readTask(file).meta.status, 'blocked'); assert.equal(readTask(dependent).meta.status, 'pending');
     assert.equal(readTask(path.join(root, 'tasks/003-task.md')).meta.status, 'completed');
@@ -346,15 +382,33 @@ test('verified partial slices continue with original acceptance open', async t =
 });
 test('early checkpoints share one charged run and absolute deadline without verified progress', async t => {
   const root = fixture(t), file = task(root, '001');
-  const r = await run(root, 'early-twice', ['--rounds', '1'], true);
+  fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace('\n---\n# Task', '\ncontext: [README.md]\n---\n# Task') +
+    '\n## Progress\n\nNext: Use the prepared selector.\n');
+  const r = await run(root, 'early-twice', ['--timeout', '5400', '--rounds', '1', '--codex-tool-output-tokens', '2048', '--diagnose'], true);
   assert.equal(r.code, 0, r.stderr); assert.equal(readTask(file).meta.status, 'completed');
   assert.equal(taskRuns(file), 1); assert.equal(r.summary.rounds.length, 1);
   const attempts = r.summary.rounds[0].attempts;
   assert.equal(attempts.length, 3); assert.deepEqual(attempts.map(x => x.reason), ['early_pending', 'early_pending', 'completed']);
   assert.equal(r.summary.rounds[0].usage.inputTokens, 30);
   assert.deepEqual(attempts.map(x => x.session_resumed), [false, true, true]);
+  assert.deepEqual(attempts.map(x => x.usage.inputTokens), [10, 10, 10]);
+  const diagnostics = JSON.parse(fs.readFileSync(r.summary.diagnostics, 'utf8'));
+  assert.equal(diagnostics.settings.tool_output_token_limit, 2048);
+  assert.equal(diagnostics.totals.dispatches_with_usage, 3);
+  assert.equal(diagnostics.totals.input_tokens, 30);
+  assert.deepEqual(diagnostics.outcomes, { completed: 1 });
+  assert.deepEqual(diagnostics.rounds[0].attempts.map(x => x.resumed), [false, true, true]);
   const prompts = attempts.map(x => fs.readFileSync(path.join(x.folder, 'prompt.md'), 'utf8'));
+  assert.match(prompts[0], /"paths":\["README.md"\],"next":"Next: Use the prepared selector\."/);
+  assert.doesNotMatch(prompts[1], /Discovery pointers/);
+  for (const attempt of attempts)
+    assert.ok(JSON.parse(fs.readFileSync(path.join(attempt.folder, 'server-argv.json'), 'utf8')).includes('tool_output_token_limit=2048'));
   assert.equal(new Set(prompts.map(x => x.match(/Deadline \(UTC\): (\S+)/)[1])).size, 1);
+  for (const prompt of prompts) {
+    const deadline = Date.parse(prompt.match(/Deadline \(UTC\): (\S+)\. Reserve/)[1]);
+    const target = Date.parse(prompt.match(/Aim to finish and verify within 60 minutes of the start of this task run, by (\S+) \(UTC\)/)[1]);
+    assert.equal(deadline - target, 30 * 60 * 1000);
+  }
   const budgets = prompts.map(x => Number(x.match(/Worker budget: ([\d.]+)/)[1]));
   assert.ok(budgets[2] < budgets[1] && budgets[1] < budgets[0]);
   for (const a of attempts) assert.equal(JSON.parse(fs.readFileSync(path.join(a.folder, 'attempt.json'), 'utf8')).reason, a.reason);
@@ -365,7 +419,10 @@ test('context handoffs get fresh history and retain peak and final request telem
   assert.equal(r.code, 0, r.stderr); assert.equal(taskRuns(file), 1);
   const attempts = r.summary.rounds[0].attempts;
   assert.equal(attempts.length, 2); assert.equal(attempts[0].reason, 'reported_context_limit');
-  assert.deepEqual(attempts[0].context, { last_input_tokens: 169838, peak_input_tokens: 449769, model_context_window: 475000 });
+  assert.equal(attempts[0].context.last_input_tokens, 169838);
+  assert.equal(attempts[0].context.peak_input_tokens, 449769);
+  assert.equal(attempts[0].context.model_context_window, 475000);
+  assert.equal(attempts[0].usage.inputTokens, 449769 + 169838);
   assert.equal(attempts[1].session_resumed, false);
   const rpc = fs.readFileSync(path.join(attempts[1].folder, 'rpc.jsonl'), 'utf8');
   assert.match(rpc, /thread\/start/); assert.doesNotMatch(rpc, /thread\/resume/);
@@ -522,36 +579,36 @@ test('Codex starts a fresh continuation when the task contract changes between r
   const args = JSON.parse(fs.readFileSync(path.join(runner.runDir, '002-001/invocation.json'), 'utf8'));
   assert.ok(!args.includes('resume')); assert.equal(readTask(file).meta.status, 'completed');
 });
-test('task run limits default to five maximum and three unfinished runs and require positive integers', () => {
+test('task run limits default to five runs and require positive integers', () => {
   const defaults = parseArgs(['--project', '/tmp']);
-  assert.equal(defaults.maxTaskRuns, 5); assert.equal(defaults.blockAfterRuns, 3);
+  assert.equal(defaults.maxTaskRuns, 5); assert.equal(defaults.blockAfterRuns, 5);
   for (const flag of ['--max-task-runs', '--block-after-runs']) {
     for (const value of ['0', '-1', '1.5', 'NaN', 'Infinity', '9007199254740992'])
       assert.throws(() => parseArgs(['--project', '/tmp', flag, value]), /positive integer/);
   }
 });
-test('task run limits block after three partial runs and continue independent work', async t => {
+test('task run limits block after five partial runs and continue independent work', async t => {
   const root = fixture(t), file = task(root, '001', { priority: 'critical' });
   const dependent = task(root, '002', { dependencies: ['001'] });
   const successor = task(root, '003');
   const r = await run(root, 'partial-first');
   assert.equal(r.code, 2, r.stderr); assert.equal(r.summary.reason, 'no_ready_tasks');
-  assert.deepEqual(r.summary.rounds.map(row => row.task_id), ['001', '001', '001', '003']);
-  const last = r.summary.rounds[2];
-  assert.equal(last.task_run, 3); assert.equal(last.status, 'blocked'); assert.equal(last.result.status, 'pending');
-  assert.equal(last.blocked_reason, 'task_run_limit'); assert.equal(taskRuns(file), 3);
+  assert.deepEqual(r.summary.rounds.map(row => row.task_id), ['001', '001', '001', '001', '001', '003']);
+  const last = r.summary.rounds[4];
+  assert.equal(last.task_run, 5); assert.equal(last.status, 'blocked'); assert.equal(last.result.status, 'pending');
+  assert.equal(last.blocked_reason, 'task_run_limit'); assert.equal(taskRuns(file), 5);
   assert.equal(readTask(file).meta.status, 'blocked'); assert.equal(readTask(dependent).meta.status, 'pending');
   assert.equal(readTask(successor).meta.status, 'completed');
-  assert.match(fs.readFileSync(file, 'utf8'), /Task run limit reached \(3\/3\)/);
+  assert.match(fs.readFileSync(file, 'utf8'), /Task run limit reached \(5\/5\)/);
   assert.match(fs.readFileSync(file, 'utf8'), limitReview);
   assert.match(last.review_request, limitReview);
   assert.equal(r.summary.blocked_tasks[0].review_request, last.review_request);
-  const receipt = JSON.parse(fs.readFileSync(path.join(path.dirname(r.events.find(event => event.summary).summary), '003-001/receipt.json'), 'utf8'));
+  const receipt = JSON.parse(fs.readFileSync(path.join(path.dirname(r.events.find(event => event.summary).summary), '005-001/receipt.json'), 'utf8'));
   assert.equal(receipt.review_request, last.review_request);
   assert.equal(r.summary.blocked_tasks[0].task_id, '001');
 });
-test('task run limits enforce a lower maximum and allow five runs with a raised blocking threshold', async t => {
-  for (const [options, limit] of [[['--max-task-runs', '2'], 2], [['--block-after-runs', '10'], 5]]) {
+test('task run limits enforce the lower of the two thresholds', async t => {
+  for (const [options, limit] of [[['--max-task-runs', '2'], 2], [['--block-after-runs', '3'], 3], [['--block-after-runs', '10'], 5]]) {
     const root = fixture(t), file = task(root, '001');
     const r = await run(root, 'partial', options);
     assert.equal(r.code, 2, r.stderr); assert.equal(r.summary.rounds.length, limit);
@@ -563,26 +620,26 @@ test('task run limits persist across restarts, state directories and native work
   const first = await run(root, 'partial', ['--rounds', '2']);
   assert.equal(first.code, 0, first.stderr); assert.equal(taskRuns(file), 2);
   const second = await run(root, 'partial', ['--state-dir', path.join(root, 'other-state')]);
-  assert.equal(second.code, 2, second.stderr); assert.equal(second.summary.rounds.length, 1);
-  assert.equal(second.summary.rounds[0].task_run, 3); assert.equal(taskRuns(file), 3);
+  assert.equal(second.code, 2, second.stderr);
+  assert.deepEqual(second.summary.rounds.map(row => row.task_run), [3, 4, 5]); assert.equal(taskRuns(file), 5);
   assert.match(fs.readFileSync(path.join(root, 'tasks/.worklogs/001.md'), 'utf8'), /Task run limit reached/);
   assert.match(fs.readFileSync(path.join(root, 'tasks/.worklogs/001.md'), 'utf8'), limitReview);
 });
 test('task run limits accept completion and PR review on the final allowed run', async t => {
   for (const [config, mode, expected] of [['', 'completed', 0], ['workflow: pr-review\n', 'in-review', 2]]) {
-    const root = fixture(t, config), file = task(root, '001'); setTaskRuns(file, 2);
+    const root = fixture(t, config), file = task(root, '001'); setTaskRuns(file, 4);
     const r = await run(root, mode);
     assert.equal(r.code, expected, r.stderr); assert.equal(r.summary.rounds[0].status, mode);
-    assert.equal(taskRuns(file), 3); assert.deepEqual(r.summary.blocked_tasks, []);
+    assert.equal(taskRuns(file), 5); assert.deepEqual(r.summary.blocked_tasks, []);
   }
 });
 test('task run limits skip already exhausted tasks without consuming worker rounds', async t => {
-  const root = fixture(t), file = task(root, '001', { priority: 'critical' }); setTaskRuns(file, 3);
+  const root = fixture(t), file = task(root, '001', { priority: 'critical' }); setTaskRuns(file, 5);
   task(root, '002');
   const r = await run(root, 'completed', ['--rounds', '1']);
   assert.equal(r.code, 0, r.stderr); assert.equal(r.summary.reason, 'round_limit');
   assert.deepEqual(r.summary.rounds.map(row => row.task_id), ['002']);
-  assert.equal(readTask(file).meta.status, 'blocked'); assert.equal(taskRuns(file), 3);
+  assert.equal(readTask(file).meta.status, 'blocked'); assert.equal(taskRuns(file), 5);
   assert.equal(r.summary.blocked_tasks[0].task_id, '001');
   assert.match(r.summary.blocked_tasks[0].review_request, limitReview);
   assert.match(fs.readFileSync(file, 'utf8'), limitReview);
@@ -759,7 +816,7 @@ test('taskmd transport preserves UTF-8 characters split across pipe chunks', asy
   assert.equal(text, 'árvíztűrő');
 });
 test('CLI rejects invalid caps and unsupported client controls before launch', () => {
-  assert.equal(parseArgs(['--project', '/tmp']).timeout, 7200);
+  assert.equal(parseArgs(['--project', '/tmp']).timeout, 5400);
   assert.equal(parseArgs(['--project', '/tmp', '--timeout', '60']).timeout, 60);
   for (const args of [['--rounds', '-1'], ['--rounds', 'NaN'], ['--timeout', '0'], ['--client', 'unknown'], ['--notify-on', 'unknown'], ['--worker']]) assert.throws(() => parseArgs(['--project', '/tmp', ...args]));
 });

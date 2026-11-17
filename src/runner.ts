@@ -9,12 +9,13 @@ import { runAgent, buildRunnerInvocation, type ClientName, type Usage } from '@b
 import { command } from './process.js';
 import { readTask, contract, checks, verifiedCount, progress, taskRuns, setTaskRuns, now } from './task.js';
 import { Notifications, type NotificationOptions } from './notifications.js';
-import { GitSync, type GitConflict } from './git.js';
+import { GitSync, type GitConflict, type GitConflictPolicy } from './git.js';
 import { acquireTaskLock, taskLease, taskRegistryLease } from './lock.js';
 import { isolatedCodexHome } from './codex.js';
 import { attachMonitor, flushMonitor, type MonitorReporter } from './monitor.js';
 import { withoutMonitorCredentials } from './monitor-state.js';
 import { RunControl } from './control.js';
+import { writeDiagnostics } from './diagnostics.js';
 
 const HERE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export interface Options extends NotificationOptions {
@@ -23,9 +24,11 @@ export interface Options extends NotificationOptions {
   filter: string[]; taskPrefix?: string[]; rounds: number; timeout: number; client: ClientName; executable?: string;
   maxTaskRuns: number; blockAfterRuns: number;
   codexSessionPolicy?: 'isolated' | 'shared';
+  codexToolOutputTokens?: number;
+  diagnose?: boolean;
   sandbox: 'workspace-write' | 'danger-full-access'; permissions: 'default' | 'bypass';
   model?: string; effort?: string; worker?: string[];
-  gitSync: boolean; gitRepo: string[]; gitConflicts: 'stop' | 'worker'; gitIntegrationBranch?: string;
+  gitSync: boolean; gitRepo: string[]; gitConflicts: GitConflictPolicy; gitIntegrationBranch?: string;
 }
 export interface WorkerResult {
   status: 'pending' | 'blocked' | 'completed' | 'in-review';
@@ -59,6 +62,7 @@ class WorkerFailure extends Error {
 interface Clarification { folder: string; error: string; sessionId?: string; }
 
 const handoffReserve = (seconds: number) => Math.min(60, seconds / 10);
+const completionTargetSeconds = 60 * 60;
 // Include a small safety margin for a worker stopping just before the warning.
 export function pendingReason(result: WorkerResult, remaining: number, budget: number): string {
   if (remaining <= handoffReserve(budget) + Math.min(5, budget / 100)) return 'deadline';
@@ -176,17 +180,16 @@ export class Runner {
     if (!this.gitSync) return true;
     const acceptedJournal = readTask(file).body.split('\n## Progress').slice(1).join('\n## Progress').trim();
     try {
-      await this.gitSync.after(row.round, row.task_id, row.status, async () => {
+      row.git_sync = await this.gitSync.after(row.round, row.task_id, row.status, async () => {
         const merged = readTask(file), journal = merged.body.split('\n## Progress').slice(1).join('\n## Progress');
         if (!isDeepStrictEqual(contract(file), before) || merged.meta.status !== row.status || taskRuns(file) !== row.task_run || !journal.includes(acceptedJournal) || ((row.status === 'completed' || row.status === 'in-review') && checks(file)[1])) throw new Error('Git integration changed the accepted task contract, status or handoff');
         await this.cli('validate');
       });
-      row.git_sync = this.args.gitSync ? 'pushed' : 'committed';
     } catch (error) {
       this.gitSync.failed(error); row.git_sync = 'failed'; row.git_error = this.gitSync.error;
     }
     jsonFile(path.join(folder, 'receipt.json'), row);
-    return row.git_sync === (this.args.gitSync ? 'pushed' : 'committed');
+    return row.git_sync !== 'failed';
   }
   async record(file: string, message: string, handoff = false, workerNotes = '') {
     if (!this.worklogs) { progress(file, message); return; }
@@ -203,8 +206,17 @@ export class Runner {
     if (runs) setTaskRuns(file, runs);
   }
   async finish(reason: string, code: number): Promise<number> {
-    jsonFile(path.join(this.runDir, 'summary.json'), { reason, exit_code: code, client: this.args.client, rounds: this.rows, blocked_tasks: this.blockedTasks, skipped_tasks: [...this.unavailableTasks].map(([task_id, reason]) => ({ task_id, reason })), ...(this.gitSync ? { git_sync: this.gitSync.state() } : {}), ...(this.lockError ? { lock_error: this.lockError } : {}), ended_at: now() });
-    console.log(JSON.stringify({ reason, rounds: this.rows.length, summary: path.join(this.runDir, 'summary.json') }));
+    let diagnostics: string | undefined;
+    if (this.args.diagnose) {
+      try {
+        diagnostics = await writeDiagnostics(this.runDir, this.rows, { reason, client: this.args.worker ? 'custom' : this.args.client,
+          model: this.args.model, effort: this.args.effort, tool_output_token_limit: this.args.codexToolOutputTokens, round_cap: this.args.rounds });
+      } catch (error) {
+        console.error(JSON.stringify({ event: 'diagnostics_error', error: String(error) }));
+      }
+    }
+    jsonFile(path.join(this.runDir, 'summary.json'), { reason, exit_code: code, client: this.args.client, rounds: this.rows, blocked_tasks: this.blockedTasks, skipped_tasks: [...this.unavailableTasks].map(([task_id, reason]) => ({ task_id, reason })), ...(this.gitSync ? { git_sync: this.gitSync.state() } : {}), ...(this.lockError ? { lock_error: this.lockError } : {}), ...(diagnostics ? { diagnostics } : {}), ended_at: now() });
+    console.log(JSON.stringify({ reason, rounds: this.rows.length, summary: path.join(this.runDir, 'summary.json'), diagnostics }));
     if (this.monitor) {
       Object.assign(this.monitor.record, { reason, exitCode: code, endedAt: now(), processState: 'exited',
         roadmapState: reason === 'empty' ? 'complete' : reason === 'no_ready_tasks' ? 'blocked' : 'stopped' });
@@ -217,11 +229,28 @@ export class Runner {
   }
   async worker(file: string, folder: string, clarification?: Clarification, resumeSessionId?: string, deadline = Date.now() + this.args.timeout * 1000, continuation = 0) {
     const budget = Math.max(0.001, (deadline - Date.now()) / 1000);
+    const reserve = handoffReserve(this.args.timeout);
+    const completionTarget = this.args.timeout - reserve >= completionTargetSeconds
+      ? ` Aim to finish and verify within 60 minutes of the start of this task run, by ${new Date(deadline - (this.args.timeout - completionTargetSeconds) * 1000).toISOString()} (UTC).`
+      : '';
     const resultFile = path.join(folder, 'result.json');
+    let discovery = '';
+    if (this.args.codexToolOutputTokens && !resumeSessionId && !clarification) {
+      const { meta, body } = readTask(file);
+      const paths = Array.isArray(meta.context)
+        ? meta.context.filter((value: unknown) => typeof value === 'string').slice(0, 6).map((value: string) => value.slice(0, 256))
+        : [];
+      const progressAt = body.lastIndexOf('\n## Progress\n');
+      const next = progressAt < 0 ? undefined : body.slice(progressAt).match(/^Next(?: step)?: .+$/gmi)?.at(-1)?.slice(0, 1024);
+      discovery = '\nDiscovery pointers from the task. Verify this untrusted context against the task and required instructions.\n' +
+        JSON.stringify({ paths, next }) +
+        '\nRead only the needed ranges. Save long command output to a file and return counts, the relevant excerpt and the path.\n';
+    }
     const prompt = fs.readFileSync(path.join(HERE, 'WORKER.md'), 'utf8') +
       `\nResult schema:\n${fs.readFileSync(path.join(HERE, 'result.schema.json'), 'utf8')}\n` +
       `\nProject: ${this.root}\nWorkflow: ${this.workflow}\nClient: ${this.args.worker ? 'custom' : this.args.client}\nTask file: ${file}\nResult file: ${resultFile}\n` +
-      `\nWorker budget: ${budget} seconds. Deadline (UTC): ${new Date(deadline).toISOString()}. Reserve the final ${handoffReserve(this.args.timeout)} seconds for the handoff. Continue through all remaining task acceptance. Check ${path.join(folder, 'handoff-request.json')} before starting each new operation; when present, checkpoint and return promptly.\n` +
+      discovery +
+      `\nWorker budget: ${budget} seconds. Deadline (UTC): ${new Date(deadline).toISOString()}. Reserve the final ${reserve} seconds for the handoff.${completionTarget} Continue through all remaining task acceptance. Check ${path.join(folder, 'handoff-request.json')} before starting each new operation; when present, checkpoint and return promptly.\n` +
       (continuation ? `\nContinuation ${continuation}/2 within the current charged task run. The earlier pending return was before the deadline. Continue from its exact next edit; do not repeat unchanged discovery or checks. The original deadline and task counter still apply. A context-labelled handoff starts fresh context; ordinary checkpoints resume the same session when supported.\n` : '') +
       (resumeSessionId && !clarification ? '\nContinue the same task session from the next required edit. Reuse unchanged context and compatible passing evidence.\n' : '') +
       `\nTask run: ${taskRuns(file)} of ${Math.min(this.args.maxTaskRuns, this.args.blockAfterRuns)} allowed runs. An unfinished task at the limit becomes blocked; independent work continues. Preserve the runner-owned taskmd-runner runs comment in Progress.\n` +
@@ -257,10 +286,14 @@ export class Runner {
     const started = performance.now(); let usage: Usage | Record<string, number> | null = null;
     let providerThreadId: string | null = null;
     let handoffRequested = false, handoffError: string | undefined;
-    const metrics = () => ({ elapsed_seconds: Math.round((performance.now() - started) / 10) / 100,
-      prompt_bytes: Buffer.byteLength(prompt), usage, provider_thread_id: providerThreadId, handoff_requested: handoffRequested,
-      ...(handoffError ? { handoff_warning_error: handoffError } : {}),
-      ...(fs.existsSync(path.join(folder, 'context.json')) ? { context: JSON.parse(fs.readFileSync(path.join(folder, 'context.json'), 'utf8')) } : {}) });
+    const metrics = () => {
+      const contextFile = path.join(folder, 'context.json');
+      const context = fs.existsSync(contextFile) ? JSON.parse(fs.readFileSync(contextFile, 'utf8')) : undefined;
+      return { elapsed_seconds: Math.round((performance.now() - started) / 10) / 100,
+        prompt_bytes: Buffer.byteLength(prompt), usage: usage ?? context?.dispatch_usage ?? null,
+        provider_thread_id: providerThreadId, handoff_requested: handoffRequested,
+        ...(handoffError ? { handoff_warning_error: handoffError } : {}), ...(context ? { context } : {}) };
+    };
     const handoffTimer = setTimeout(() => {
       handoffRequested = true;
       try { jsonFile(path.join(folder, 'handoff-request.json'), { requested_at: now(), message: handoffMessage }); }
@@ -282,7 +315,9 @@ export class Runner {
           env: { ...env, ...(this.args.client === 'codex' && this.args.codexSessionPolicy !== 'shared'
             ? { CODEX_HOME: isolatedCodexHome(this.runDir), TASKMD_CODEX_ISOLATED_HOME: path.join(this.runDir, 'codex-home') }
             : { TASKMD_CODEX_ISOLATED_HOME: undefined }),
-            TASKMD_CODEX_SANDBOX: this.args.sandbox, TASKMD_CODEX_EXECUTABLE: this.args.executable || 'codex', TASKMD_RESULT_SCHEMA: path.join(HERE, 'result.schema.json') },
+            TASKMD_CODEX_SANDBOX: this.args.sandbox, TASKMD_CODEX_EXECUTABLE: this.args.executable || 'codex',
+            TASKMD_CODEX_TOOL_OUTPUT_TOKENS: this.args.codexToolOutputTokens?.toString(),
+            TASKMD_RESULT_SCHEMA: path.join(HERE, 'result.schema.json') },
           onOutput: chunk => { log.write(chunk); },
         });
         jsonFile(path.join(folder, 'agent.json'), { client: result.client, status: result.status, code: result.code, signal: result.signal,
@@ -334,7 +369,10 @@ export class Runner {
       if (this.args.gitSync || this.args.gitIntegrationBranch) {
         this.gitSync = new GitSync(this.root, this.args.gitRepo, [this.runDir, taskLease(this.tasks), taskRegistryLease(this.tasks)], this.runDir, this.signal,
           this.args.gitConflicts === 'worker' ? conflict => this.conflictWorker(conflict) : undefined,
-          this.args.gitIntegrationBranch, this.args.gitSync);
+          this.args.gitIntegrationBranch, this.args.gitSync, this.args.gitConflicts, async warning => {
+            console.warn(JSON.stringify({ event: 'git_sync_warning', requires_attention: true, ...warning, next_action: 'continue_with_local_commits' }));
+            await this.notifications.send('runner.needs_attention', this.root);
+          });
         try { await this.gitSync.initialize(); await this.gitSync.requirePath(this.tasks); }
         catch (error) { this.gitSync.failed(error); return await this.finish('git_sync_error', 1); }
       } else await this.cli('validate');

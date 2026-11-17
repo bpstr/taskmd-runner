@@ -15,15 +15,17 @@ Select pending taskmd work, claim it, run one worker, validate and repeat.
   --client NAME          ${CLIENT_NAMES.join(', ')} (default codex)
   --rounds N             Maximum worker rounds; 0 drains ready work (default 0)
   --max-task-runs N      Maximum runs per task across restarts (default 5)
-  --block-after-runs N   Block unfinished tasks after N runs (default 3)
+  --block-after-runs N   Block unfinished tasks after N runs (default 5)
   --filter EXPR          Repeatable taskmd filter
   --task-prefix PATH     Allow a task-directory subtree; repeat for alternatives
-  --timeout SECONDS      Per-worker timeout (default 7200; 2 hours)
+  --timeout SECONDS      Hard timeout per task run (default 5400 seconds, 90 minutes)
   --model NAME           Codex default gpt-6.1-sol; other clients inherit configuration
   --effort LEVEL         Codex default medium; other clients inherit configuration
   --permissions POLICY  default or bypass (explicit unattended permission opt-in)
   --sandbox MODE         Codex workspace-write (default) or danger-full-access
   --codex-session-policy POLICY  isolated (default) or shared desktop history
+  --codex-tool-output-tokens N  Opt-in Codex context budget per tool result
+  --diagnose             Write detailed run usage and tool statistics
   --executable PATH      Agent executable override
   --taskmd PATH          taskmd executable (default taskmd)
   --config PATH          Project config override
@@ -32,7 +34,7 @@ Select pending taskmd work, claim it, run one worker, validate and repeat.
   --git-sync             Fetch/merge before tasks; commit/push valid rounds
   --git-integration-branch NAME  Merge a local branch before each task; commit handoffs
   --git-repo PATH        Repeatable repository path (default project checkout)
-  --git-conflicts MODE   stop (default) or worker for a dedicated resolver
+  --git-conflicts MODE   skip (default), stop, or worker for a dedicated resolver
   --notify POLICY       attention (default) or off
   --notify-on EVENT      Additional alert; repeatable or comma-separated:
                         ${notificationEvents.join(', ')}
@@ -42,13 +44,14 @@ Select pending taskmd work, claim it, run one worker, validate and repeat.
   monitor test|status|enable|disable|flush [--json]   Roadmap Monitor reporting
 `;
 export function parseArgs(argv: string[]): Options {
-  const options: Options = { project: '', taskmd: 'taskmd', filter: [], rounds: 0, maxTaskRuns: 5, blockAfterRuns: 3, timeout: 7200, client: 'codex', sandbox: 'workspace-write', permissions: 'default', notify: 'attention', notifyOn: [], gitSync: false, gitRepo: [], gitConflicts: 'stop' };
+  const options: Options = { project: '', taskmd: 'taskmd', filter: [], rounds: 0, maxTaskRuns: 5, blockAfterRuns: 5, timeout: 5400, client: 'codex', sandbox: 'workspace-write', permissions: 'default', notify: 'attention', notifyOn: [], gitSync: false, gitRepo: [], gitConflicts: 'skip' };
   const strings: Record<string, keyof Options> = { '--project': 'project', '--config': 'config', '--task-dir': 'taskDir', '--state-dir': 'stateDir', '--taskmd': 'taskmd', '--model': 'model', '--effort': 'effort', '--client': 'client', '--sandbox': 'sandbox', '--executable': 'executable', '--permissions': 'permissions', '--notify': 'notify' };
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
     if (flag === '--lane') { options.lane = laneName(argv[++i]); if (argv[i] === undefined) throw new Error('Missing value for --lane'); continue; }
     if (flag === '--worker') { options.worker = argv.slice(i + 1); if (!options.worker.length) throw new Error('--worker must be nonempty'); break; }
     if (flag === '--git-sync') { options.gitSync = true; continue; }
+    if (flag === '--diagnose') { options.diagnose = true; continue; }
     const value = argv[++i];
     if (value === undefined) throw new Error(`Missing value for ${flag}`);
     if (strings[flag]) Object.assign(options, { [strings[flag]]: value });
@@ -56,6 +59,7 @@ export function parseArgs(argv: string[]): Options {
     else if (flag === '--task-prefix') (options.taskPrefix ??= []).push(value);
     else if (flag === '--rounds') options.rounds = Number(value);
     else if (flag === '--codex-session-policy') options.codexSessionPolicy = value as Options['codexSessionPolicy'];
+    else if (flag === '--codex-tool-output-tokens') options.codexToolOutputTokens = Number(value);
     else if (flag === '--max-task-runs') options.maxTaskRuns = Number(value);
     else if (flag === '--block-after-runs') options.blockAfterRuns = Number(value);
     else if (flag === '--timeout') options.timeout = Number(value);
@@ -74,8 +78,11 @@ export function parseArgs(argv: string[]): Options {
   if (!['workspace-write', 'danger-full-access'].includes(options.sandbox)) throw new Error('Invalid sandbox');
   if (!['default', 'bypass'].includes(options.permissions)) throw new Error('Invalid permissions');
   if (options.codexSessionPolicy !== undefined && !['isolated', 'shared'].includes(options.codexSessionPolicy)) throw new Error('Invalid Codex session policy');
+  if (options.codexToolOutputTokens !== undefined &&
+      (!Number.isSafeInteger(options.codexToolOutputTokens) || options.codexToolOutputTokens <= 0 || options.client !== 'codex' || options.worker))
+    throw new Error('--codex-tool-output-tokens requires a positive integer and the Codex client');
   if (!['attention', 'off'].includes(options.notify)) throw new Error('Invalid notification policy');
-  if (!['stop', 'worker'].includes(options.gitConflicts)) throw new Error('Invalid Git conflict policy');
+  if (!['skip', 'stop', 'worker'].includes(options.gitConflicts)) throw new Error('Invalid Git conflict policy');
   if (!options.gitSync && !options.gitIntegrationBranch && (options.gitRepo.length || options.gitConflicts === 'worker')) throw new Error('--git-repo and --git-conflicts worker require --git-sync or --git-integration-branch');
   if (options.notifyOn.some(event => !notificationEvents.includes(event))) throw new Error('Unknown notification event');
   if (options.client === 'codex') {

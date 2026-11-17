@@ -2,7 +2,7 @@
 
 A sequential taskmd loop: select pending work, claim it, run one coding worker,
 validate the result, update the task Markdown and repeat. It exits when the selected
-queue has no ready work. It never polls an empty queue or retries failed workers.
+queue has no ready work.
 
 Requires Node.js 20+, taskmd 0.8.0 and a configured coding-agent CLI. Supports
 Codex, Claude, Gemini, Grok, Kimi and Muse through the public
@@ -31,18 +31,15 @@ The project supplies `.taskmd.yaml`, task files and repository instructions.
 `--rounds 0` (the default) drains ready work. Filters are repeatable and passed
 directly to taskmd. Strict priority ordering preserves phase and dependency gates.
 
-Each task has a maximum of 5 worker runs (`--max-task-runs 5`). Unfinished work
-becomes blocked after 3 runs by default (`--block-after-runs 3`); the lower limit
-applies. A verified partial slice counts as a run. Completion or a valid PR-review
+Unfinished tasks block after five charged runs by default. Adjust the limit with
+`--max-task-runs` and `--block-after-runs`. The lower value applies. A verified
+partial slice counts as a run. Completion or a valid PR-review
 handoff on the final allowed run is accepted. At the limit, the runner records
 the blocker and requests owner review or splitting into subtasks that collectively
 preserve the original scope and acceptance criteria. This request appears in the
 task handoff and run summary, and in the receipt when a worker reaches the limit.
 The runner selects independent ready work; dependent tasks remain gated.
-These limits are separate from `--rounds`, which caps workers for the whole
-invocation. Each worker has a two-hour timeout by default (`--timeout 7200`),
-allowing up to six hours over three runs. To allow five sessions for a task that has
-been reviewed, raise both thresholds, for example `--block-after-runs 5`.
+`--rounds` caps charged runs for the whole invocation.
 
 The runner keeps a `<!-- taskmd-runner runs: N -->` counter under `## Progress`,
 so counts survive restarts, changed evidence directories, Git synchronization
@@ -61,8 +58,10 @@ owning checkout at claim time; symlinks cannot widen an allowed subtree.
 The default Codex sandbox is `workspace-write`; select `danger-full-access` only
 in an environment where the task already authorizes that access. Model and effort
 default to `gpt-6.1-sol` and `medium` for Codex; explicit flags override them.
-Other clients inherit their configuration. `--timeout` bounds each
-worker in seconds (default 7200, or two hours). `--client` defaults to `codex`; `--model` and
+Other clients inherit their configuration. `--timeout` sets the hard deadline for
+each task run in seconds (default 5400, or 90 minutes). Workers aim to finish and
+verify within 60 minutes when the timeout allows and can continue until the
+deadline. `--client` defaults to `codex`; `--model` and
 `--effort` use these defaults for Codex and are otherwise passed only when supplied. Clients that do not support an effort
 override fail before a task is claimed. Other clients inherit their permission
 configuration; `--permissions bypass` explicitly enables unattended permissions.
@@ -91,6 +90,20 @@ Workers read its requirements and latest Progress from disk using bounded reads.
 The stable worker instructions and result schema precede changing run details;
 the task body and accumulated history are not copied into each launch prompt.
 Reading files still consumes context, and cache savings depend on provider reuse.
+
+The runner uses Codex's configured tool-output handling by default.
+`--codex-tool-output-tokens N` (MCP `codex_tool_output_tokens`) is an
+experimental override that also adds bounded task pointers for fresh workers.
+Codex receipts report per-dispatch usage from cumulative thread events, with
+last and peak input retained as context diagnostics.
+
+Use `--diagnose` or MCP `diagnose: true` to write `diagnostics.json` beside
+the run summary. It records delivery outcomes, per-dispatch token coverage and
+context, and observed Codex tool calls, nonzero exits, exact repeats and shell
+output sizes. The first eight shell calls per dispatch are reported separately
+to help identify discovery overhead. Shell bytes measure app-server events.
+They do not measure retained model context. The report omits command text,
+arguments and output. Other clients retain reported usage where available.
 
 By default, Codex workers use a private `codex-home/` inside the runner's run
 directory, including when `--state-dir` is supplied. Persistent sessions and
@@ -283,10 +296,12 @@ command arguments. Setup and probes create no dashboard run or model call.
 
 Configured invocations report automatically, including custom workers. The
 dashboard shows `Taskmd · PROJECT`, task IDs/titles, rounds, validated summaries,
-blockers and terminal outcomes. An empty finished queue is completed; a round cap
-requires attention even when the CLI exits successfully. Blocked tasks remain
-visible while independent work continues. Interruptions are cancelled; unexpected
-runner failures are failed. Existing runs need restarting to adopt reporting.
+blockers and terminal outcomes. Draining the queue or reaching a configured round
+cap without blockers completes the invocation. Capped runs show “round limit”
+in the run details. Blocked tasks still require attention when a cap is reached
+and remain visible while independent work continues. Interruptions are cancelled.
+Unexpected runner failures are failed. Existing runs need restarting to adopt
+reporting.
 
 `monitor disable` / `monitor enable` preserve the connection and its identity.
 `TASKMD_MONITOR=off` disables reporting for one invocation. Environment overrides
@@ -332,8 +347,8 @@ Use `git_integration_branch: "main"` with MCP `runner_start`. Add `git_sync: tru
 accepted handoffs there. The local integration branch and the lane's upstream
 are separate sources. A pause during selection refreshes Git and reselects work
 after resume. In-task continuations keep their current working changes; merges
-happen at task boundaries. All selected `--git-repo` checkouts must contain the
-named local branch. Existing conflict handling applies to both modes.
+happen at task boundaries. The named local branch must be present in each
+selected `--git-repo` checkout for integration to run.
 
 Git-managed lanes require separate checkouts. Their whole-task-store lease
 prevents a merge from changing files underneath a worker in the same checkout.
@@ -366,8 +381,11 @@ Keep `.taskmd-runner/` ignored or store evidence outside the repositories.
 If synchronization changes the runner configuration, restart so the controller
 can acquire the correct task-directory lease and workflow settings.
 
-Conflicts stop the runner by default. `--git-conflicts worker` starts one
-dedicated session using the selected client, model, permissions and timeout.
+By default, `--git-conflicts skip` aborts a merge conflict created by the current
+runner, verifies that the checkout is clean, and continues with local commits.
+`--git-conflicts stop` preserves the merge for manual resolution.
+`--git-conflicts worker` starts one dedicated session using the selected client,
+model, permissions and timeout.
 That worker edits only the supplied conflicted files. The controller checks the
 resolution and stages, commits and pushes it. Conflict sessions have separate
 receipts under `git-conflicts/`; they do not consume task `--rounds`. There is at
@@ -375,13 +393,18 @@ most one resolver per repository at each pre-task or publication boundary.
 Custom workers receive `TASKMD_WORKER_ROLE=git-conflict` and the repository in
 `TASKMD_GIT_REPOSITORY`; their stdin contains the scoped resolution instructions.
 
-Synchronization errors exit with `git_sync_error` and stop further task workers.
-A failed push preserves local commits and completed task status. If upstream
-advanced during a worker, the controller fetches, integrates it and retries the
-push once. A multi-repository failure can leave some repositories already pushed;
-`git-sync.json` and the summary identify each completed step. Merges and local
-changes remain available for recovery. The controller never force-pushes,
-stashes, resets, or switches branches.
+An unavailable upstream, missing integration branch, or rejected push pauses
+fetches, merges and pushes for the rest of the run. The runner emits one
+`git_sync_warning` on stderr, sends an attention notification when enabled, and
+keeps committing accepted handoffs locally. Receipts label those handoffs
+`committed`. See `git-sync.json` or the summary for the failure and any pushes
+that already succeeded. After fixing the issue, a later synchronized handoff can
+publish the retained commits, or you can reconcile and push them manually.
+
+If upstream advances during a worker, the controller still tries to integrate
+it and retry the push once. An unfinished operation, failed conflict resolution,
+or an unsafe checkout exits with `git_sync_error` and preserves the checkout for
+reconciliation.
 
 ## Worker commands and locking
 

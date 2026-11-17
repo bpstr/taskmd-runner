@@ -31,7 +31,7 @@ test('projection keeps explicit task activity, redacts private data and distingu
   assert.equal(projectMonitor(record, state).activity.observed_at, report.activity.observed_at);
   assert.ok(!JSON.stringify(report).includes('/Users/private'));
   assert.equal(monitorText(`${key} password=secret sk-abcdefghijk /Users/private/file`), '[REDACTED] password=[REDACTED] [REDACTED] [private path]');
-  for (const [reason, outcome] of [['empty', 'completed'], ['round_limit', 'needs_attention'], ['no_ready_tasks', 'needs_attention'], ['interrupted', 'cancelled'], ['runner_error', 'failed']]) {
+  for (const [reason, outcome] of [['empty', 'completed'], ['round_limit', 'completed'], ['no_ready_tasks', 'needs_attention'], ['interrupted', 'cancelled'], ['runner_error', 'failed']]) {
     Object.assign(record, { reason, roadmapState: reason === 'empty' ? 'complete' : 'stopped', exitCode: 0 });
     assert.equal(terminalOutcome(record), outcome);
     const terminal = projectMonitor(record, state, true);
@@ -90,7 +90,9 @@ test('a pending request cannot lose the terminal outcome and sends only one requ
   const finish = reporter.finish();
   release(); await Promise.all([pending, finish]);
   assert.equal(reports[0].kind, 'snapshot');
-  assert.equal(reports.at(-1).run.terminal_outcome, 'needs_attention');
+  assert.equal(reports.at(-1).run.terminal_outcome, 'completed');
+  assert.equal(reports.at(-1).run.reason_code, 'round_limit');
+  assert.deepEqual(reports.at(-1).attention, []);
   assert.ok(!fs.existsSync(`${reporter.file}.publisher`));
 });
 

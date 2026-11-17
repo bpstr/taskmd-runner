@@ -47,8 +47,9 @@ const reason = (value: any, fallback = "runner_status") =>
 const label = (value: string) => monitorText(path.basename(value));
 export function terminalOutcome(record: MonitorRun) {
   if (record.reason === "empty" && record.roadmapState === "complete") return "completed";
+  if (record.reason === "round_limit") return record.attentionTasks?.length ? "needs_attention" : "completed";
   if (record.reason === "interrupted") return "cancelled";
-  if (["round_limit", "no_ready_tasks", "unmet_dependency", "no_progress"].includes(record.reason ?? "")) return "needs_attention";
+  if (["no_ready_tasks", "unmet_dependency", "no_progress"].includes(record.reason ?? "")) return "needs_attention";
   return "failed";
 }
 export function projectMonitor(
