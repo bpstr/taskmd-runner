@@ -30,6 +30,7 @@ const startSchema = z.object({
   notify: z.enum(['attention', 'off']).optional(), codex_session_policy: z.enum(['isolated', 'shared']).optional(),
   permissions: z.enum(['default', 'bypass']).optional(),
   sandbox: z.enum(['workspace-write', 'danger-full-access']).optional(),
+  codex_permissions_profile: z.string().trim().min(1).optional().describe('Name of a configured Codex permissions profile for the Codex worker'),
   git_sync: z.boolean().optional(), git_repos: z.array(z.string()).max(64).optional(),
   git_integration_branch: z.string().min(1).optional().describe('Local integration branch, e.g. main. Merge before each task and commit handoffs; git_sync additionally fetches/pushes upstream.'),
   git_conflicts: z.enum(['skip', 'stop', 'worker']).optional(),
@@ -77,7 +78,7 @@ export function createRunnerMcp(self = false) {
     }, input => guarded(async () => {
       const args: string[] = [];
       const values = ['client', 'rounds', 'timeout', 'max_task_runs', 'block_after_runs', 'model', 'effort',
-        'config', 'task_dir', 'state_dir', 'permissions', 'sandbox', 'git_conflicts', 'git_integration_branch', 'taskmd', 'executable', 'notify', 'codex_session_policy'] as const;
+        'config', 'task_dir', 'state_dir', 'permissions', 'sandbox', 'git_conflicts', 'git_integration_branch', 'taskmd', 'executable', 'notify', 'codex_session_policy', 'codex_permissions_profile'] as const;
       for (const key of values) if (input[key] !== undefined) args.push('--' + key.replaceAll('_', '-'), String(input[key]));
       for (const [key, flag] of [['filters', '--filter'], ['task_prefixes', '--task-prefix'], ['git_repos', '--git-repo']] as const)
         for (const value of input[key] || []) args.push(flag, value);

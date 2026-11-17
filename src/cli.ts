@@ -24,6 +24,7 @@ Select pending taskmd work, claim it, run one worker, validate and repeat.
   --effort LEVEL         Codex default medium; other clients inherit configuration
   --permissions POLICY  default or bypass (explicit unattended permission opt-in)
   --sandbox MODE         Codex workspace-write (default) or danger-full-access
+  --codex-permissions-profile NAME  Select a named Codex permissions profile
   --codex-session-policy POLICY  isolated (default) or shared desktop history
   --executable PATH      Agent executable override
   --taskmd PATH          taskmd executable (default taskmd)
@@ -58,6 +59,10 @@ export function parseArgs(argv: string[]): Options {
     else if (flag === '--task-prefix') (options.taskPrefix ??= []).push(value);
     else if (flag === '--rounds') options.rounds = Number(value);
     else if (flag === '--codex-session-policy') options.codexSessionPolicy = value as Options['codexSessionPolicy'];
+    else if (flag === '--codex-permissions-profile') {
+      if (!value.trim()) throw new Error('Codex permissions profile must be nonempty');
+      options.codexPermissionsProfile = value;
+    }
     else if (flag === '--max-task-runs') options.maxTaskRuns = Number(value);
     else if (flag === '--block-after-runs') options.blockAfterRuns = Number(value);
     else if (flag === '--timeout') options.timeout = Number(value);
@@ -75,6 +80,9 @@ export function parseArgs(argv: string[]): Options {
   if (!Number.isFinite(options.timeout) || options.timeout <= 0 || !Number.isSafeInteger(options.timeout * 1000) || options.timeout * 1000 > 2147483647) throw new Error('timeout must be positive and fit a Node timer');
   if (!['workspace-write', 'danger-full-access'].includes(options.sandbox)) throw new Error('Invalid sandbox');
   if (!['default', 'bypass'].includes(options.permissions)) throw new Error('Invalid permissions');
+  if (options.codexPermissionsProfile && (options.client !== 'codex' || options.worker ||
+      options.sandbox !== 'workspace-write' || options.permissions !== 'default'))
+    throw new Error('--codex-permissions-profile requires the Codex worker with default permissions and sandbox mode');
   if (options.codexSessionPolicy !== undefined && !['isolated', 'shared'].includes(options.codexSessionPolicy)) throw new Error('Invalid Codex session policy');
   if (!['attention', 'off'].includes(options.notify)) throw new Error('Invalid notification policy');
   if (!['skip', 'stop', 'worker'].includes(options.gitConflicts)) throw new Error('Invalid Git conflict policy');

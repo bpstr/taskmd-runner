@@ -596,6 +596,25 @@ test('Codex resumes a partial task session and starts the next task fresh within
   assert.ok(Number(prompt.match(/Worker budget: ([\d.]+) seconds/)[1]) <= 10);
   assert.equal(Number(prompt.match(/Reserve the final ([\d.]+) seconds/)[1]), 1);
 });
+test('Codex starts and resumes worker threads with the selected permissions profile', async t => {
+  const root = fixture(t); task(root, '001');
+  const flags = ['--project', root, '--codex-permissions-profile', 'prepared-loopback'];
+  for (const incompatible of [['--client', 'claude'], ['--sandbox', 'danger-full-access'], ['--permissions', 'bypass'], ['--worker', 'fixture']]) {
+    assert.throws(() => parseArgs([...flags, ...incompatible]), /requires the Codex worker/);
+  }
+  const r = await run(root, 'partial-once-first', ['--codex-permissions-profile', 'prepared-loopback'], true);
+  assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual(r.summary.rounds.map(row => row.session_resumed), [false, true]);
+  const dir = path.dirname(r.events.find(event => event.summary).summary);
+  for (const [round, method] of [['001-001', 'thread/start'], ['002-001', 'thread/resume']]) {
+    const requests = fs.readFileSync(path.join(dir, round, 'rpc.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+    assert.equal(requests.find(request => request.method === 'initialize').params.capabilities.experimentalApi, true);
+    const { params } = requests.find(request => request.method === method);
+    assert.equal(params.permissions, 'prepared-loopback');
+    assert.equal(params.approvalPolicy, 'never');
+    assert.ok(!('sandbox' in params));
+  }
+});
 test('Codex isolates persistent history and reuses profile inputs across continuations', async t => {
   const root = fixture(t); task(root, '001');
   const profile = path.join(root, 'prepared-profile'); fs.mkdirSync(profile);

@@ -13,6 +13,7 @@ const effortConfig = args.find(arg => arg.startsWith('model_reasoning_effort='))
 const effort = effortConfig ? JSON.parse(effortConfig.slice(effortConfig.indexOf('=') + 1)) : undefined;
 const resume = value('resume');
 const isolatedHome = process.env.TASKMD_CODEX_ISOLATED_HOME;
+const profile = process.env.TASKMD_CODEX_PERMISSIONS_PROFILE;
 const runnerMcp = process.env.TASKMD_RUNNER_SELF_ID ? ['-c', `mcp_servers.taskmd_runner={command=${JSON.stringify(process.execPath)},args=[${JSON.stringify(fileURLToPath(new URL('./taskmd-runner.js', import.meta.url)))},"mcp","--self"],env_vars=["TASKMD_RUNNER_SELF_ID","TASKMD_RUNNER_SELF_ENDPOINT","TASKMD_RUNNER_SELF_TOKEN"]}`] : [];
 const child = spawn(process.env.TASKMD_CODEX_EXECUTABLE || 'codex',
   ['app-server', '--listen', 'stdio://', '-c', 'approval_policy="never"',
@@ -119,10 +120,13 @@ for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => {
 });
 try {
   const version = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
-  await request('initialize', { clientInfo: { name: 'taskmd_runner', title: 'Taskmd Runner', version } });
+  await request('initialize', { clientInfo: { name: 'taskmd_runner', title: 'Taskmd Runner', version },
+    ...(profile ? { capabilities: { experimentalApi: true } } : {}) });
   send({ method: 'initialized', params: {} });
   const config = { cwd: process.cwd(), approvalPolicy: 'never',
-    sandbox: args.includes('--dangerously-bypass-approvals-and-sandbox') ? 'danger-full-access' : process.env.TASKMD_CODEX_SANDBOX || 'workspace-write',
+    ...(profile ? { permissions: profile } : {
+      sandbox: args.includes('--dangerously-bypass-approvals-and-sandbox') ? 'danger-full-access' : process.env.TASKMD_CODEX_SANDBOX || 'workspace-write',
+    }),
     ...(value('--model') ? { model: value('--model') } : {}) };
   const response = await request(resume ? 'thread/resume' : 'thread/start',
     { ...config, ...(resume ? { threadId: resume, excludeTurns: true } : { ephemeral: args.includes('--ephemeral') }) });
