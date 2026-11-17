@@ -164,7 +164,7 @@ export class GitSync {
       targetHead = (await this.git(repo.path, 'rev-parse', '--verify', `${target}^{commit}`)).trim();
       counts = (await this.git(repo.path, 'rev-list', '--left-right', '--count', `HEAD...${targetHead}`)).trim().split(/\s+/).map(Number);
     } catch (error) { return await this.skipSync(repo.path, phase, error); }
-    if (!counts[1]) return;
+    if (!counts[1]) return false;
     if (!counts[0]) {
       try { await this.git(repo.path, 'merge', '--ff-only', '--no-autostash', '--no-overwrite-ignore', '--', targetHead); }
       catch (error) {
@@ -173,7 +173,7 @@ export class GitSync {
       }
       repo.head = (await this.git(repo.path, 'rev-parse', 'HEAD')).trim();
       await verify?.();
-      this.event('fast_forward', repo.path, { phase, target, head: repo.head }); return;
+      this.event('fast_forward', repo.path, { phase, target, head: repo.head }); return true;
     }
     try { await this.git(repo.path, 'merge', '--no-ff', '--no-commit', '--no-autostash', '--no-overwrite-ignore', '--', targetHead); }
     catch (error) {
@@ -214,6 +214,7 @@ export class GitSync {
     await this.git(repo.path, 'commit', '-m', target === repo.upstream ? 'Merge upstream changes for the next task' : `Merge ${this.integrationBranch} for the next task`);
     repo.head = (await this.git(repo.path, 'rev-parse', 'HEAD')).trim();
     this.event('merge', repo.path, { phase, target, head: repo.head });
+    return true;
   }
   async before(round: number) {
     // Preflight all checkouts before changing any of them.
@@ -270,20 +271,20 @@ export class GitSync {
     }
     if (!this.syncUpstream || this.warning) return 'committed';
     for (const repo of this.repositories) {
-      let upstream: string;
-      try { upstream = (await this.git(repo.path, 'rev-parse', repo.upstream)).trim(); }
-      catch (error) { await this.skipSync(repo.path, `publish round ${round}`, error); return 'committed'; }
       try { await this.git(repo.path, 'push', '--', repo.remote, `HEAD:${repo.remoteRef}`); }
       catch (error) {
         try {
           await this.git(repo.path, 'fetch', '--no-tags', '--', repo.remote);
-          if ((await this.git(repo.path, 'rev-parse', repo.upstream)).trim() === upstream) throw error;
         } catch (retryError) {
           await this.requireClean(repo, 'after a failed push');
           await this.skipSync(repo.path, `publish round ${round}`, retryError); return 'committed';
         }
-        await this.merge(repo, `publish round ${round}`, verify);
-        if (this.warning) return 'committed';
+        // Another process may have fetched before this push. Compare the
+        // upstream history to HEAD, not to the previous tracking ref.
+        if (!await this.merge(repo, `publish round ${round}`, verify)) {
+          if (!this.warning) await this.skipSync(repo.path, `publish round ${round}`, error);
+          return 'committed';
+        }
         try { await this.git(repo.path, 'push', '--', repo.remote, `HEAD:${repo.remoteRef}`); }
         catch (retryError) {
           await this.requireClean(repo, 'after a failed push retry');

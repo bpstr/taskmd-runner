@@ -6,6 +6,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import { MonitorReporter, projectMonitor, terminalOutcome, monitorText, flushMonitor } from '../dist/monitor.js';
+import { taskBlockerResolved } from '../dist/monitor-replay.js';
 import { configureMonitor, diagnostics, monitorConfig, readMonitorConfig, saveMonitorConfig, endpoint } from '../dist/monitor-config.js';
 import { command } from '../dist/process.js';
 
@@ -51,6 +52,65 @@ test('configuration preserves saved credentials on rejection and disabled settin
   process.env.TASKMD_MONITOR_URL = config.endpoint; process.env.TASKMD_MONITOR_API_KEY = key;
   assert.equal(monitorConfig(), null);
   for (const url of ['http://example.com/ingest', 'https://user:pass@example.com', 'https://example.com?key=secret']) assert.throws(() => endpoint(url));
+});
+
+test('terminal attention resolves per task after exit and retries a failed update', async t => {
+  const record = fixture(t), reports = [];
+  let reject = false;
+  const server = createServer(async (req, res) => {
+    let body = '';
+    for await (const chunk of req) body += chunk;
+    reports.push(JSON.parse(body));
+    res.writeHead(reject ? 503 : 200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ installation_id: installation, protocol_versions: [1] }));
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  await configureMonitor(`http://127.0.0.1:${server.address().port}/ingest`, key, 'Prepared');
+  const directory = fs.realpathSync(process.env.TASKMD_MONITOR_STATE_DIR);
+  const write = (file, id, status) => fs.writeFileSync(path.join(directory, file),
+    `---\nid: '${id}'\nstatus: ${status}\n---\n# Prepared task\n`);
+  write('001.md', '001', 'blocked');
+  write('002.md', '002', 'blocked');
+  write('003.md', '003', 'blocked');
+  const reporter = new MonitorReporter(record, {
+    timers: false, taskDirectory: directory,
+    refreshAttention: () => {
+      record.attentionTasks = record.attentionTasks.filter(
+        id => !taskBlockerResolved(directory, id, reporter.state.taskBlockers[id]));
+    },
+  });
+  reporter.state.taskBlockers = { '001': '001.md', '002': '002.md', '003': '003.md' };
+  record.attentionTasks = ['001', '002', '003'];
+  await reporter.send();
+  assert.deepEqual(reports.at(-1).attention.map(item => item.task_id), ['001', '002', '003']);
+  write('003.md', '003', 'in-progress');
+  await reporter.send();
+  assert.equal(reports.at(-1).run.terminal, false);
+  assert.deepEqual(reports.at(-1).attention.map(item => item.task_id), ['001', '002']);
+  Object.assign(record, { reason: 'no_ready_tasks', roadmapState: 'blocked', endedAt: new Date().toISOString() });
+  await reporter.finish();
+  const original = reports.at(-1);
+  assert.deepEqual(original.attention.map(item => item.task_id), ['001', '002']);
+  assert.equal((await flushMonitor()).attempted, 0);
+  write('001.md', '001', 'completed');
+  write('002.md', 'replacement', 'completed');
+  assert.equal((await flushMonitor(1, path.join(directory, 'different'))).attempted, 0);
+  reject = true;
+  await flushMonitor();
+  const failed = reports.at(-1);
+  assert.deepEqual(failed.attention.map(item => item.task_id), ['002']);
+  assert.deepEqual(failed.run, original.run);
+  assert.equal(failed.kind, 'replay');
+  assert.ok(failed.report_sequence > original.report_sequence);
+  reject = false;
+  await flushMonitor();
+  assert.equal(reports.at(-1).report_sequence, failed.report_sequence);
+  write('002.md', '002', 'cancelled');
+  await flushMonitor();
+  assert.deepEqual(reports.at(-1).attention, []);
+  assert.ok(reports.at(-1).report_sequence > failed.report_sequence);
+  assert.equal((await flushMonitor()).attempted, 0);
 });
 
 test('publisher sends current state before sparse history, retains failures and replays terminal state', async t => {

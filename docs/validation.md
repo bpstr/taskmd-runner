@@ -1048,3 +1048,16 @@ title request separately from the task prompt.
 Release evidence, including the focused logs and native harness, is stored under
 `.taskmd-runner/release-0.4.4/`. The release tarball is checked in a disposable
 installation for CLI help, version, and MCP discovery before publication.
+
+## Resolved task attention
+
+Use the monitor tests and the prepared runner reporting selectors. Verify that a
+live snapshot refreshes task state, a later flush can revise a terminal snapshot
+with a higher sequence, and retry preserves that sequence after a delivery
+failure. A different task directory or a replaced task ID must leave the original
+alert open. Removing the last task alert preserves the terminal outcome and does
+not add a new run alert. The TypeScript build, eight monitor checks and five
+prepared runner reporting checks passed. The prepared tests use a loopback
+receiver and no model calls. The selectors took under four seconds after the
+build. Their coverage is limited to reporting and replay, so no wider runner
+suite was needed.

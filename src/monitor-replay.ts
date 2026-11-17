@@ -1,24 +1,73 @@
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { atomicJson, registryRoot } from "./monitor-state.js";
+import { atomicJson } from "./monitor-state.js";
 import { probe, type MonitorConfig } from "./monitor-config.js";
 import { acquirePublisher } from "./monitor-lock.js";
+import { readTask } from "./task.js";
+
+export function taskBlockerResolved(directory: string, id: string, taskPath: string) {
+  try {
+    const file = path.resolve(directory, taskPath);
+    const relative = path.relative(directory, file);
+    if (!relative || relative === ".." || relative.startsWith(".." + path.sep) ||
+        path.isAbsolute(relative) || fs.realpathSync(file) !== file) return false;
+    const { meta } = readTask(file);
+    return String(meta.id) === id &&
+      ["pending", "in-progress", "in-review", "completed", "cancelled"].includes(meta.status);
+  } catch {
+    return false;
+  }
+}
+
+export function resolvedTerminalAttention(state: any) {
+  const report = state.terminal ?? state.attentionReceipt;
+  if (!report?.run.terminal || !state.taskDirectory || !state.taskBlockers) return null;
+  const remaining = report.attention.filter((item: any) => {
+    const id = item.task_id;
+    const taskPath = id && Object.hasOwn(state.taskBlockers, id) && state.taskBlockers[id];
+    return item.category !== "blocker" || !taskPath ||
+      !taskBlockerResolved(state.taskDirectory, id, taskPath);
+  });
+  return remaining.length < report.attention.length ? remaining : null;
+}
+
+export function rememberTerminalAttention(state: any, report: any) {
+  if (state.taskDirectory && report.attention.some((item: any) =>
+    item.category === "blocker" && Object.hasOwn(state.taskBlockers ?? {}, item.task_id))) {
+    state.attentionReceipt = { ...report, events: [] };
+  } else {
+    delete state.attentionReceipt;
+  }
+}
+
 export async function flushStored(
   config: MonitorConfig,
   file: string,
-  state: any,
+  taskDirectory?: string,
 ) {
   const release = acquirePublisher(file);
   if (!release) return false;
   try {
     // Reload under the lock: a publisher may have completed since directory enumeration.
-    state = JSON.parse(fs.readFileSync(file, "utf8"));
+    const state = JSON.parse(fs.readFileSync(file, "utf8"));
     if (
       state.connectionId !== config.connectionId ||
       (state.installationId && state.installationId !== config.installationId)
     )
       return false;
+    const attention = !taskDirectory || state.taskDirectory === taskDirectory
+      ? resolvedTerminalAttention(state) : null;
+    if (attention) {
+      const previous = state.terminal ?? state.attentionReceipt;
+      state.sequence = Math.max(state.sequence, previous.report_sequence) + 1;
+      state.terminal = {
+        ...previous, attention, report_sequence: state.sequence, report_id: randomUUID(),
+      };
+      atomicJson(file, state);
+    }
+    const base = state.terminal ?? state.replayBase ?? state.initial;
+    if (!base || (!state.terminal && !state.events.length)) return false;
     const verified =
       config.verified && config.installationId
         ? { installation_id: config.installationId }
@@ -28,8 +77,6 @@ export async function flushStored(
       state.installationId !== verified.installation_id
     )
       return false;
-    const base = state.terminal ?? state.replayBase ?? state.initial;
-    if (!base) return false;
     const events = [];
     for (const event of state.events.slice(0, 32)) {
       if (
@@ -57,6 +104,7 @@ export async function flushStored(
     const ids = new Set(events.map((e) => e.id));
     state.events = state.events.filter((e: any) => !ids.has(e.id));
     if (state.events.length === 0) {
+      if (base.run.terminal) rememberTerminalAttention(state, base);
       delete state.terminal;
       delete state.initial;
       delete state.replayBase;

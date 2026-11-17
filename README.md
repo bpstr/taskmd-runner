@@ -96,7 +96,12 @@ deadline. `--client` defaults to `codex`; `--model` and
 `--effort` use these defaults for Codex and are otherwise passed only when supplied. Clients that do not support an effort
 override fail before a task is claimed. Other clients inherit their permission
 configuration; `--permissions bypass` explicitly enables unattended permissions.
-Codex retains the original sandbox and `approval_policy="never"` behavior.
+Use `--codex-permissions-profile NAME` (MCP `codex_permissions_profile`) to
+select a named profile already configured in Codex. This requires a Codex
+version whose app server supports named profiles. The same profile applies when
+starting and resuming a thread. Interactive approvals remain disabled. Use the
+profile with the Codex worker and the default runner permission and sandbox
+flags.
 `--executable` overrides the selected agent binary. Each task starts a fresh
 session. Workers continue through full task acceptance within the supplied
 deadline; verified slices are checkpoints within execution. Sizing estimates do
@@ -338,8 +343,11 @@ blockers and terminal outcomes. Draining the queue or reaching a configured roun
 cap without blockers completes the invocation. Capped runs show “round limit”
 in the run details. Blocked tasks still require attention when a cap is reached
 and remain visible while independent work continues. Interruptions are cancelled.
-Unexpected runner failures are failed. Existing runs need restarting to adopt
-reporting.
+Unexpected runner failures are failed.
+Heartbeats clear task alerts when the
+same local task is requeued, taken up, completed, or cancelled. Terminal reports
+retain outstanding task alerts for reconciliation by a later runner in the same
+task directory or by `monitor flush`. The original run outcome and task history remain available.
 
 `monitor disable` / `monitor enable` preserve the connection and its identity.
 `TASKMD_MONITOR=off` disables reporting for one invocation. Environment overrides

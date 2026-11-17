@@ -357,12 +357,20 @@ test('push rejection warns once and later tasks still commit locally', async t =
   }
   assert.equal(git(repo, 'status', '--porcelain', '--untracked-files=no'), '');
 });
-test('one push race fetches and merges the new upstream before a bounded retry', async t => {
-  const base = temporary(t), { repo, peer, remote } = repository(base), controller = sync(repo, path.join(base, 'evidence')); await controller.initialize(); await controller.before(1);
-  fs.writeFileSync(path.join(repo, 'local-finished.txt'), 'finished\n'); fs.writeFileSync(path.join(peer, 'remote.txt'), 'concurrent\n'); commit(peer); git(peer, 'push');
-  let verified = 0; await controller.after(1, '001', 'completed', async () => { verified++; });
-  assert.equal(verified, 1); assert.equal(git(remote, 'show', 'main:remote.txt'), 'concurrent'); assert.equal(git(remote, 'show', 'main:local-finished.txt'), 'finished');
-});
+for (const prefetched of [false, true]) {
+  test(`one push race integrates ${prefetched ? 'already-fetched' : 'newly fetched'} upstream before a bounded retry`, async t => {
+    const base = temporary(t), { repo, peer, remote } = repository(base), controller = sync(repo, path.join(base, 'evidence'));
+    await controller.initialize(); await controller.before(1);
+    fs.writeFileSync(path.join(repo, 'local-finished.txt'), 'finished\n');
+    fs.writeFileSync(path.join(peer, 'remote.txt'), 'concurrent\n'); commit(peer); git(peer, 'push');
+    if (prefetched) git(repo, 'fetch', 'origin');
+    let verified = 0;
+    assert.equal(await controller.after(1, '001', 'completed', async () => { verified++; }), 'pushed');
+    assert.equal(verified, 1);
+    assert.equal(git(remote, 'show', 'main:remote.txt'), 'concurrent');
+    assert.equal(git(remote, 'show', 'main:local-finished.txt'), 'finished');
+  });
+}
 test('task worker staging is rejected before the controller can publish its index', async t => {
   const base = temporary(t), { repo } = repository(base); tasks(repo); commit(repo); git(repo, 'push');
   const r = await run(repo, [], { PREPARED_GIT_REPOS: JSON.stringify([repo]), PREPARED_GIT_STAGE: '1' });

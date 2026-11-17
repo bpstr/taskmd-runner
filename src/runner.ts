@@ -13,6 +13,7 @@ import { GitSync, type GitConflict, type GitConflictPolicy } from './git.js';
 import { acquireTaskLock, taskLease, taskRegistryLease } from './lock.js';
 import { isolatedCodexHome } from './codex.js';
 import { attachMonitor, flushMonitor, type MonitorReporter } from './monitor.js';
+import { taskBlockerResolved } from './monitor-replay.js';
 import { atomicJson, withoutMonitorCredentials } from './monitor-state.js';
 import { RunControl } from './control.js';
 import { writeDiagnostics } from './diagnostics.js';
@@ -97,6 +98,7 @@ export class Runner {
   private lockError?: string;
   private configText: string;
   private monitor?: MonitorReporter | null;
+  private monitorBlockers = new Map<string, { taskPath: string; reason: string }>();
   private monitorSequence = 0;
   private control?: RunControl;
   private async controlCheckpoint() {
@@ -181,6 +183,19 @@ export class Runner {
     this.unavailableTasks.set(id, reason);
     console.log(JSON.stringify({ event: 'task_skipped', task_id: id, reason, next_action: 'select_next_task' }));
   }
+  private refreshMonitorAttention() {
+    if (!this.monitor) return;
+    for (const [id, blocker] of this.monitorBlockers) {
+      if (taskBlockerResolved(this.tasks, id, blocker.taskPath)) this.monitorBlockers.delete(id);
+    }
+    this.monitor.record.attentionTasks = [...this.monitorBlockers.keys()];
+    this.monitor.record.attentionReasons = Object.fromEntries(
+      [...this.monitorBlockers].map(([id, blocker]) => [id, blocker.reason]),
+    );
+    this.monitor.state.taskBlockers = Object.fromEntries(
+      [...this.monitorBlockers].map(([id, blocker]) => [id, blocker.taskPath]),
+    );
+  }
   private async reportBlocked(row: Record<string, any>, folder?: string) {
     const blocked = { task_id: row.task_id, task_path: row.task_path, task_runs: row.task_run,
       reason: row.blocked_reason || 'worker_blocked', limit: row.task_run_limit,
@@ -188,8 +203,8 @@ export class Runner {
       ...(row.error ? { error: row.error } : {}), ...(folder ? { receipt: path.join(folder, 'receipt.json') } : {}) };
     this.blockedTasks.push(blocked);
     if (this.monitor) {
-      this.monitor.record.attentionTasks = this.blockedTasks.map(task => task.task_id);
-      this.monitor.record.attentionReasons = Object.fromEntries(this.blockedTasks.map(task => [task.task_id, task.reason]));
+      this.monitorBlockers.set(blocked.task_id, { taskPath: blocked.task_path, reason: blocked.reason });
+      this.refreshMonitorAttention();
       this.monitorEvent('runner.blocked', { task: row.task_id, reasonCode: blocked.reason });
     }
     console.log(JSON.stringify({ event: 'task_blocked', ...blocked, next_action: 'select_next_task' }));
@@ -249,6 +264,7 @@ export class Runner {
       console.log(JSON.stringify({ ...report, storage_error: String(storageError), summary_error: String(error) }));
     }
     if (this.monitor) {
+      this.refreshMonitorAttention();
       Object.assign(this.monitor.record, { reason, exitCode: code, endedAt, processState: 'exited',
         roadmapState: reason === 'empty' ? 'complete' : reason === 'no_ready_tasks' ? 'blocked' : 'stopped' });
       this.monitorEvent('runner.stopped', { reasonCode: reason });
@@ -417,10 +433,11 @@ export class Runner {
       await this.control.open();
       release = await acquireTaskLock(this.tasks, error => { this.lockError = error.message; lease.abort(); }, this.args.gitSync || this.args.gitIntegrationBranch ? [] : this.taskPrefixes);
       fs.mkdirSync(this.runDir, { recursive: true });
-      void flushMonitor(1).catch(() => {});
       this.monitor = attachMonitor({ id: this.control.status.run_id.replaceAll('-', '').slice(0, 24), roadmap: this.root,
-        createdAt: now(), readyAt: now(), processState: 'running', roadmapState: 'in_progress', pid: process.pid });
+        createdAt: now(), readyAt: now(), processState: 'running', roadmapState: 'in_progress', pid: process.pid },
+      { taskDirectory: this.tasks, refreshAttention: () => this.refreshMonitorAttention() });
       this.monitorEvent('runner.started');
+      if (this.monitor) void flushMonitor(1, this.tasks).catch(() => {});
       // Check adapter controls before claiming any task.
       if (!this.args.worker) buildRunnerInvocation({ client: this.args.client, prompt: 'preflight', workdir: this.root, model: this.args.model, effort: this.args.effort, permissions: this.args.permissions });
       if (this.args.gitSync || this.args.gitIntegrationBranch) {
@@ -448,6 +465,7 @@ export class Runner {
             return await this.finish(this.lockError ? 'lock_lost' : this.signal?.aborted ? 'interrupted' : 'git_sync_error', this.lockError ? 1 : this.signal?.aborted ? 130 : 1);
           }
         }
+        this.refreshMonitorAttention();
         const selected = await this.nextTasks();
         if (!selected.length) {
           const remaining = await this.cliJson('list', '--format', 'json', ...this.filters);
