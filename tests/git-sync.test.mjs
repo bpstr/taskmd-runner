@@ -74,6 +74,45 @@ test('Git CLI options require explicit sync and preserve worker argv', () => {
   assert.equal(parseArgs(['--project', '/tmp', '--git-sync']).gitConflicts, 'skip');
   assert.throws(() => parseArgs(['--project', '/tmp', '--git-integration-branch', '']), /nonempty/);
 });
+test('a concurrent disjoint commit on main preserves the handoff and the next round', async t => {
+  const base = temporary(t), { repo } = repository(base);
+  tasks(repo, 2);
+  fs.writeFileSync(path.join(repo, '.gitignore'), '.taskmd-runner/\n');
+  fs.writeFileSync(path.join(repo, 'integration.txt'), 'before first worker\n');
+  commit(repo);
+  const result = await run(repo, ['--git-integration-branch', 'main'], { PREPARED_GIT_LOCAL_INTEGRATION: repo }, undefined, false);
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(result.summary.rounds.map(row => [row.task_id, row.git_sync]), [['001', 'committed'], ['002', 'committed']]);
+  assert.equal(git(repo, 'log', '-3', '--format=%s'), 'Complete task 002\nComplete task 001\nAdvance local integration branch');
+  assert.equal(fs.readFileSync(path.join(result.directory, '002-002/integration-seen.txt'), 'utf8'), 'after first worker\n');
+  assert.equal(result.summary.git_sync.events.filter(event => event.event === 'integration_head_adopted').length, 1);
+  assert.equal(git(repo, 'status', '--porcelain'), '');
+});
+test('a concurrent commit to the active task is rejected even if its file is clean', async t => {
+  const base = temporary(t), { repo } = repository(base);
+  tasks(repo); commit(repo);
+  const controller = new GitSync(repo, [], [], path.join(base, 'evidence'), undefined, undefined, 'main', false);
+  await controller.initialize(); await controller.before(1);
+  const task = fs.realpathSync(path.join(repo, 'tasks/001-task.md'));
+  fs.appendFileSync(task, '\nConcurrent task edit\n'); commit(repo, 'Edit the active task externally');
+  fs.writeFileSync(path.join(repo, 'shared.txt'), 'Worker handoff\n');
+  const head = git(repo, 'rev-parse', 'HEAD');
+  await assert.rejects(controller.after(1, '001', 'completed', async () => assert.fail('Must reject before verification'), task), /overlaps the accepted handoff.*001-task/);
+  assert.equal(git(repo, 'rev-parse', 'HEAD'), head);
+  assert.equal(git(repo, 'diff', '--cached', '--name-only'), '');
+  assert.equal(fs.readFileSync(path.join(repo, 'shared.txt'), 'utf8'), 'Worker handoff\n');
+});
+test('same-branch rewritten history fails with working edits preserved', async t => {
+  const base = temporary(t), { repo } = repository(base);
+  fs.writeFileSync(path.join(repo, 'baseline.txt'), 'old baseline\n'); commit(repo);
+  const controller = new GitSync(repo, [], [], path.join(base, 'evidence'), undefined, undefined, 'main', false);
+  await controller.initialize(); await controller.before(1);
+  git(repo, 'reset', '--hard', 'HEAD^');
+  fs.writeFileSync(path.join(repo, 'shared.txt'), 'Worker edit\n');
+  await assert.rejects(controller.after(1, '001', 'completed', async () => {}), /HEAD changed outside the controller/);
+  assert.equal(fs.readFileSync(path.join(repo, 'shared.txt'), 'utf8'), 'Worker edit\n');
+  assert.equal(git(repo, 'diff', '--cached', '--name-only'), '');
+});
 test('local worktree integration merges main before every task without a remote', async t => {
   const base = temporary(t), { repo } = repository(base);
   tasks(repo, 2); fs.mkdirSync(path.join(repo, 'tasks/api'));
