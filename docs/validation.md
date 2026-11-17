@@ -15,6 +15,12 @@ The build and 40 existing Git cases passed. The three added cases passed in
 evidence directory. Reuse the existing passing cases because those fixture
 edits did not change the controller.
 
+For the same-file handoff repair, the build and all 46 Git cases passed in
+about 65 seconds. Three prepared cases exercise a working file that retains the
+incoming edit, a working file that omits it, and a real content conflict. Only
+the first case revalidates and commits the handoff. The focused Codex worker
+permissions profile case also passed with a prepared server.
+
 ## 0.4.3 release
 
 Scope includes PR #5, storage recovery for issue #6, and the session defaults.

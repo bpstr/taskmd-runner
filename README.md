@@ -375,11 +375,12 @@ Git-managed lanes require separate checkouts. Their whole-task-store lease
 prevents a merge from changing files underneath a worker in the same checkout.
 
 When a lane runs directly on the configured integration branch, it can adopt an
-external fast-forward at a clean task boundary. At handoff it can adopt the new
-HEAD if the incoming paths are disjoint from the current checkout edits and the
-active task record and worklog. The controller validates the accepted task
-again before committing its captured paths. Branch switches, rewrites, staged
-worker changes and overlapping updates stop the handoff and preserve the edits.
+external fast-forward at a clean task boundary. At handoff it can adopt disjoint
+changes and same-file text changes when `git merge-file --object-id` confirms the
+working file already contains the incoming edit. The controller validates the
+accepted task again before committing its captured paths. Changes to the active
+task record or worklog, branch switches, rewrites, staged worker changes and
+overlaps that Git cannot verify stop the handoff with the edits preserved.
 Coordinate other writers so they commit only their own paths.
 
 Opt in for a repository with a configured tracking branch:

@@ -102,6 +102,38 @@ test('a concurrent commit to the active task is rejected even if its file is cle
   assert.equal(git(repo, 'diff', '--cached', '--name-only'), '');
   assert.equal(fs.readFileSync(path.join(repo, 'shared.txt'), 'utf8'), 'Worker handoff\n');
 });
+for (const [description, working, accepted] of [
+  ['contains both edits', 'incoming\none\ntwo\nthree\nworker\n', true],
+  ['omits an incoming edit', 'first\none\ntwo\nthree\nworker\n', false],
+  ['conflicts with an incoming edit', 'different\none\ntwo\nthree\nworker\n', false],
+]) {
+  test(`a concurrent same-file commit when the worktree ${description}`, async t => {
+    const base = temporary(t), { repo } = repository(base);
+    const file = path.join(repo, 'shared.txt');
+    fs.writeFileSync(file, 'first\none\ntwo\nthree\nlast\n'); commit(repo);
+    const controller = new GitSync(repo, [], [], path.join(base, 'evidence'), undefined, undefined, 'main', false);
+    await controller.initialize(); await controller.before(1);
+    fs.writeFileSync(file, 'incoming\none\ntwo\nthree\nlast\n'); commit(repo, 'Advance the integration branch');
+    const incoming = git(repo, 'rev-parse', 'HEAD');
+    fs.writeFileSync(file, working);
+    let verified = 0;
+    const handoff = controller.after(1, '001', 'completed', async () => { verified++; });
+    if (accepted) {
+      assert.equal(await handoff, 'committed');
+      assert.equal(verified, 1);
+      assert.equal(git(repo, 'rev-parse', 'HEAD^'), incoming);
+      assert.equal(git(repo, 'show', 'HEAD:shared.txt'), working.trim());
+      assert.deepEqual(controller.events.find(event => event.event === 'integration_head_adopted').retained_files, ['shared.txt']);
+      assert.equal(git(repo, 'status', '--porcelain'), '');
+    } else {
+      await assert.rejects(handoff, /overlaps the accepted handoff.*shared\.txt/);
+      assert.equal(verified, 0);
+      assert.equal(git(repo, 'rev-parse', 'HEAD'), incoming);
+      assert.equal(git(repo, 'diff', '--cached', '--name-only'), '');
+    }
+    assert.equal(fs.readFileSync(file, 'utf8'), working);
+  });
+}
 test('same-branch rewritten history fails with working edits preserved', async t => {
   const base = temporary(t), { repo } = repository(base);
   fs.writeFileSync(path.join(repo, 'baseline.txt'), 'old baseline\n'); commit(repo);

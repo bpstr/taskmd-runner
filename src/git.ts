@@ -64,7 +64,23 @@ export class GitSync {
       if (fs.existsSync(file)) throw new Error(`Unfinished Git operation (${name}) in ${repo}; reconcile it before starting`);
     }
   }
-  private async identity(repo: Repository, integration?: { phase: string; files: string[] }) {
+  private async preservesIncomingFile(repo: Repository, head: string, file: string) {
+    try {
+      if (!fs.lstatSync(path.join(repo.path, file)).isFile()) return false;
+      const entry = async (commit: string) => (await this.git(repo.path, 'ls-tree',
+        '--format=%(objectmode) %(objectname)', commit, '--', file)).trim().match(/^(100644|100755) ([0-9a-f]+)$/);
+      const [base, incoming] = await Promise.all([entry(repo.head), entry(head)]);
+      if (!base || !incoming || base[1] !== incoming[1]) return false;
+      const working = (await this.git(repo.path, 'hash-object', '-w', '--', file)).trim();
+      // Verify that incorporating the concurrent change leaves the worktree blob identical.
+      const merged = (await this.git(repo.path, 'merge-file', '--quiet', '--object-id', working, base[2], incoming[2])).trim();
+      return merged === working;
+    } catch {
+      // Conflicts, binary files and older Git versions retain the existing stop behavior.
+      return false;
+    }
+  }
+  private async identity(repo: Repository, integration?: { phase: string; files: string[]; protectedFiles?: string[] }) {
     const branch = (await this.git(repo.path, 'symbolic-ref', '--short', 'HEAD')).trim();
     const head = (await this.git(repo.path, 'rev-parse', 'HEAD')).trim();
     if (branch === repo.branch && head === repo.head) return false;
@@ -73,12 +89,21 @@ export class GitSync {
     const base = (await this.git(repo.path, 'merge-base', repo.head, head)).trim();
     if (base !== repo.head) throw changedIdentity;
     const incoming = split(await this.git(repo.path, 'diff', '--name-only', '--no-renames', '-z', repo.head, head, '--'));
-    const overlap = incoming.find(file => integration.files.some(owned =>
-      file === owned || file.startsWith(owned + '/') || owned.startsWith(file + '/')));
-    if (overlap) throw new Error(`Concurrent Git update overlaps the accepted handoff in ${repo.path}: ${overlap}`);
+    const overlaps = (file: string, owned: string) => file === owned || file.startsWith(owned + '/') || owned.startsWith(file + '/');
+    const retainedFiles: string[] = [];
+    for (const file of incoming) {
+      const protectedPath = integration.protectedFiles?.some(owned => overlaps(file, owned));
+      const changedPaths = integration.files.filter(owned => overlaps(file, owned));
+      if (!protectedPath && !changedPaths.length) continue;
+      if (protectedPath || changedPaths.some(owned => owned !== file) || !await this.preservesIncomingFile(repo, head, file)) {
+        throw new Error(`Concurrent Git update overlaps the accepted handoff in ${repo.path}: ${file}`);
+      }
+      retainedFiles.push(file);
+    }
     const previousHead = repo.head;
     repo.head = head;
-    this.event('integration_head_adopted', repo.path, { phase: integration.phase, previous_head: previousHead, head });
+    this.event('integration_head_adopted', repo.path, { phase: integration.phase, previous_head: previousHead, head,
+      ...(retainedFiles.length ? { retained_files: retainedFiles } : {}) });
     return true;
   }
   private async requireClean(repo: Repository, phase: string) {
@@ -224,7 +249,7 @@ export class GitSync {
       const protectedFiles = taskFile && inside(repo.path, taskFile)
         ? [taskFile, path.join(path.dirname(taskFile), '.worklogs', `${id}.md`)].map(file => path.relative(repo.path, file).split(path.sep).join('/'))
         : [];
-      if (await this.identity(repo, { phase: `checkpoint round ${round}`, files: [...files, ...protectedFiles] })) adopted = true;
+      if (await this.identity(repo, { phase: `checkpoint round ${round}`, files, protectedFiles })) adopted = true;
       handoffs.push({ repo, files });
     }
     if (adopted) await verify();
