@@ -226,7 +226,7 @@ test('MCP protocol exposes compact exact-target control, revision checks and sel
 test('MCP detached start, boundary pause/resume and stop retain prepared task receipts', async t => {
   const dir = fixture(t), root = project(dir, 'prepared workspace');
   const client = await mcp(t);
-  const started = await client.tool('runner_start', { project: root, lane: 'prepared', notify: 'off', timeout: 30,
+  const started = await client.tool('runner_start', { project: root, lane: 'prepared', notify: 'off', timeout: 30, diagnose: true,
     worker: [process.execPath, path.join(ROOT, 'tests/control-worker.mjs')] });
   assert.equal(started.error, false, JSON.stringify(started.value));
   const id = started.value.run_id;
@@ -248,6 +248,9 @@ test('MCP detached start, boundary pause/resume and stop retain prepared task re
   assert.equal((await nextClient.tool('runner_control', { run_id: id, action: 'resume' })).value.state, 'running');
   const finished = await waitFor(() => runStatus(id), s => s.state === 'exited', 'drained run');
   assert.equal(finished.reason, 'empty'); assert.equal(finished.round, 2);
+  const diagnostics = JSON.parse(fs.readFileSync(path.join(finished.run_dir, 'diagnostics.json')));
+  assert.deepEqual(diagnostics.outcomes, { completed: 2 });
+  assert.equal(diagnostics.totals.dispatches_with_tool_logs, 0);
   assert.equal((await nextClient.tool('runner_list', { project: root })).value.runs.length, 0);
   assert.equal((await nextClient.tool('runner_list', { project: root, include_exited: true })).value.runs[0].run_id, id);
   assert.equal(JSON.parse(fs.readFileSync(path.join(finished.run_dir, 'summary.json'))).rounds.length, 2);
@@ -258,7 +261,7 @@ test('MCP detached start, boundary pause/resume and stop retain prepared task re
   const gitFailed = await waitFor(() => runStatus(gitStart.value.run_id), s => s.state === 'exited', 'local Git option forwarding');
   assert.equal(gitFailed.reason, 'git_sync_error', 'MCP forwards local Git mode even without upstream sync');
   const cancelRoot = project(dir, 'cancel workspace', ['003']);
-  const stopping = await nextClient.tool('runner_start', { project: cancelRoot, lane: 'cancel', notify: 'off', timeout: 30,
+  const stopping = await nextClient.tool('runner_start', { project: cancelRoot, lane: 'cancel', notify: 'off', timeout: 30, diagnose: true,
     worker: [process.execPath, fake, 'timeout'] });
   assert.equal(stopping.error, false, JSON.stringify(stopping.value));
   const stopId = stopping.value.run_id;
@@ -275,6 +278,7 @@ test('MCP detached start, boundary pause/resume and stop retain prepared task re
   assert.equal(cancelled.reason, 'interrupted'); assert.equal(cancelled.exit_code, 130);
   const summary = JSON.parse(fs.readFileSync(path.join(cancelled.run_dir, 'summary.json')));
   assert.equal(summary.rounds[0].status, 'blocked');
+  assert.deepEqual(JSON.parse(fs.readFileSync(summary.diagnostics)).outcomes, { blocked: 1 });
   assert.match(fs.readFileSync(path.join(cancelRoot, 'tasks', '003-task.md'), 'utf8'), /status: blocked/);
 });
 

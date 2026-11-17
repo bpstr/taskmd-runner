@@ -9,6 +9,7 @@ const emit = message => process.stdout.write(JSON.stringify(message) + '\n');
 const threadId = 'prepared-thread', turnId = 'prepared-turn';
 let config, resumed = false, startParams, waiting = false;
 const folder = process.env.TASKMD_ROUND_DIR;
+const session = path.join(process.env.CODEX_HOME, 'sessions', threadId + '.json');
 fs.writeFileSync(path.join(folder, 'server-argv.json'), JSON.stringify(process.argv.slice(2)));
 fs.writeFileSync(path.join(folder, 'server-home.json'), JSON.stringify({ home: process.env.CODEX_HOME }));
 const perform = mode => {
@@ -28,8 +29,16 @@ const perform = mode => {
     if (e.type === 'turn.completed') {
       const u = e.usage;
       const pressure = mode === 'context-once';
-      if (pressure) notify('thread/tokenUsage/updated', { tokenUsage: { modelContextWindow: 475000, last: { inputTokens: 449769, outputTokens: 2, cachedInputTokens: 0 } } });
-      notify('thread/tokenUsage/updated', { tokenUsage: { modelContextWindow: 475000, last: { inputTokens: pressure ? 169838 : u.input_tokens, outputTokens: u.output_tokens, cachedInputTokens: 0 } } });
+      const total = { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0,
+        ...(resumed ? JSON.parse(fs.readFileSync(session, 'utf8')) : {}) };
+      const updateUsage = (inputTokens, outputTokens, cachedInputTokens) => {
+        const last = { inputTokens, outputTokens, cachedInputTokens };
+        for (const key of Object.keys(last)) total[key] += last[key];
+        notify('thread/tokenUsage/updated', { tokenUsage: { modelContextWindow: 475000, last, total } });
+      };
+      if (pressure) updateUsage(449769, 2, 0);
+      updateUsage(pressure ? 169838 : u.input_tokens, u.output_tokens, u.cached_input_tokens ?? 0);
+      if (fs.existsSync(session)) fs.writeFileSync(session, JSON.stringify(total));
       finished = true;
       notify('turn/completed', { turn: { id: turnId, status: failure ? 'failed' : 'completed', error: failure ? { message: failure } : null } });
     }
@@ -48,7 +57,6 @@ for await (const line of createInterface({ input: process.stdin })) {
   if (message.method === 'initialize') emit({ id: message.id, result: {} });
   else if (message.method === 'thread/start' || message.method === 'thread/resume') {
     config = p; resumed = message.method === 'thread/resume';
-    const session = path.join(process.env.CODEX_HOME, 'sessions', threadId + '.json');
     if (resumed && !fs.existsSync(session)) {
       emit({ id: message.id, error: { message: 'Prepared session missing from worker profile' } }); continue;
     }

@@ -13,6 +13,7 @@ import { parseArgs } from '../dist/cli.js';
 import { Runner, pendingReason } from '../dist/runner.js';
 import { Notifications } from '../dist/notifications.js';
 import { command } from '../dist/process.js';
+import { writeDiagnostics } from '../dist/diagnostics.js';
 process.env.TASKMD_MONITOR = 'off';
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const fake = path.join(ROOT, 'tests/fake-worker.mjs');
@@ -35,6 +36,24 @@ function task(root, id, { priority = 'medium', dependencies = [], status = 'pend
   fs.writeFileSync(file, '---\n' + stringify({ id, title: 'Task ' + id, status, priority, dependencies }) + '---\n# Task\n\n- [ ] Deliver the fixture\n');
   return file;
 }
+test('diagnostics count replayed events once and omit tool content', async t => {
+  const root = fixture(t);
+  const command = (id, exitCode) => ({ method: 'item/completed', params: {
+    threadId: 'prepared', item: { id, type: 'commandExecution', command: 'private command',
+      aggregatedOutput: 'private output', exitCode },
+  } });
+  fs.writeFileSync(path.join(root, 'worker.jsonl'),
+    [command('a', 0), command('a', 0), command('b', 1)].map(event => JSON.stringify(event)).join('\n') + '\npartial');
+  const report = await writeDiagnostics(root, [{ task_id: '001', status: 'blocked', attempts: [{ folder: root }] }], { client: 'codex' });
+  const output = fs.readFileSync(report, 'utf8');
+  assert.doesNotMatch(output, /private (command|output)/);
+  const { totals } = JSON.parse(output);
+  assert.equal(totals.tool_calls, 2);
+  assert.equal(totals.unsuccessful_calls, 1);
+  assert.equal(totals.exact_repeats, 1);
+  assert.equal(totals.malformed_lines, 1);
+  assert.equal(totals.dispatches_with_usage, 0);
+});
 async function run(root, mode = 'completed', options = [], adapter = false, env = {}) {
   const args = [path.join(ROOT, 'bin/taskmd-runner.js'), '--project', root, '--notify', 'off', '--timeout', '10', ...options];
   if (adapter) args.push('--executable', fake);
@@ -49,8 +68,9 @@ async function run(root, mode = 'completed', options = [], adapter = false, env 
 }
 for (const scenario of [
   { name: 'drained queue', mode: 'completed', options: [], outcome: 'completed', code: 0 },
-  { name: 'round cap', mode: 'completed', options: ['--rounds', '1'], outcome: 'needs_attention', code: 0 },
+  { name: 'round cap', mode: 'completed', options: ['--rounds', '1'], outcome: 'completed', code: 0 },
   { name: 'blocked task followed by independent work', mode: 'blocked-first', options: [], outcome: 'needs_attention', code: 2 },
+  { name: 'round cap with a blocked task', mode: 'blocked-first', options: ['--rounds', '2'], outcome: 'needs_attention', code: 0 },
 ]) test(`monitor reports ${scenario.name} through prepared workers`, async t => {
   const root = fixture(t); task(root, '001', { priority: 'critical' }); task(root, '002');
   const reports = [], key = `rm_${'a'.repeat(16)}_${'b'.repeat(64)}`;
@@ -68,6 +88,11 @@ for (const scenario of [
   const envelopes = reports.filter(report => report.kind !== 'probe'), final = envelopes.at(-1);
   assert.equal(final.run.terminal, true); assert.equal(final.run.heartbeat_expected, false);
   assert.equal(final.run.terminal_outcome, scenario.outcome);
+  if (scenario.options.length) {
+    assert.equal(r.summary.reason, 'round_limit');
+    assert.equal(final.run.reason_code, 'round_limit');
+    assert.equal(final.run.roadmap_state, 'stopped');
+  }
   assert.match(envelopes[0].run.roadmap_label, /^Taskmd · /);
   assert.equal(final.last_update?.outcome, 'completed');
   assert.ok(final.run.last_progress_at);
@@ -76,7 +101,9 @@ for (const scenario of [
   assert.ok(!JSON.stringify(envelopes).includes(root)); assert.ok(!JSON.stringify(envelopes).includes(key));
   if (scenario.mode === 'blocked-first') {
     assert.deepEqual(r.summary.rounds.map(row => row.task_id), ['001', '002']);
-    assert.equal(final.attention[0].task_id, '001');
+    assert.deepEqual(final.attention.map(item => item.task_id), ['001']);
+  } else {
+    assert.deepEqual(final.attention, []);
   }
   if (process.env.MONITOR_REPORT_CAPTURE) fs.writeFileSync(path.join(process.env.MONITOR_REPORT_CAPTURE, scenario.mode + (scenario.options.length ? '-cap' : '') + '.json'), JSON.stringify(envelopes));
 });
@@ -133,13 +160,21 @@ test('empty queue never launches worker', async t => {
 test('adapter accepts large tool events while bounding retained output', async t => {
   for (const client of ['codex', 'claude']) {
     const root = fixture(t), file = task(root, '001');
-    const r = await run(root, 'large-event', ['--client', client], true);
+    const r = await run(root, 'large-event', ['--client', client, '--diagnose'], true);
     assert.equal(r.code, 0, r.stderr); assert.equal(r.summary.reason, 'empty');
     assert.equal(readTask(file).meta.status, 'completed');
     const folder = path.join(path.dirname(r.events.find(event => event.summary).summary), '001-001');
     const agent = JSON.parse(fs.readFileSync(path.join(folder, 'agent.json'), 'utf8'));
     assert.equal(agent.status, 'success'); assert.equal(agent.error, null);
     assert.equal(agent.truncated.stdout, true);
+    const diagnostics = JSON.parse(fs.readFileSync(r.summary.diagnostics, 'utf8'));
+    if (client === 'codex') {
+      assert.equal(diagnostics.totals.shell_calls, 1);
+      assert.ok(diagnostics.totals.shell_output_bytes > 1024 * 1024);
+      assert.equal(diagnostics.totals.first_eight_shell_output_bytes, diagnostics.totals.shell_output_bytes);
+    } else {
+      assert.equal(diagnostics.totals.dispatches_with_tool_logs, 0);
+    }
     assert.equal(agent.usage.inputTokens, 10);
     assert.ok(fs.statSync(path.join(folder, 'worker.jsonl')).size > 2 * 1024 * 1024);
   }
@@ -481,14 +516,27 @@ test('verified partial slices continue with original acceptance open', async t =
 });
 test('early checkpoints share one charged run and absolute deadline without verified progress', async t => {
   const root = fixture(t), file = task(root, '001');
-  const r = await run(root, 'early-twice', ['--timeout', '5400', '--rounds', '1'], true);
+  fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace('\n---\n# Task', '\ncontext: [README.md]\n---\n# Task') +
+    '\n## Progress\n\nNext: Use the prepared selector.\n');
+  const r = await run(root, 'early-twice', ['--timeout', '5400', '--rounds', '1', '--codex-tool-output-tokens', '2048', '--diagnose'], true);
   assert.equal(r.code, 0, r.stderr); assert.equal(readTask(file).meta.status, 'completed');
   assert.equal(taskRuns(file), 1); assert.equal(r.summary.rounds.length, 1);
   const attempts = r.summary.rounds[0].attempts;
   assert.equal(attempts.length, 3); assert.deepEqual(attempts.map(x => x.reason), ['early_pending', 'early_pending', 'completed']);
   assert.equal(r.summary.rounds[0].usage.inputTokens, 30);
   assert.deepEqual(attempts.map(x => x.session_resumed), [false, true, true]);
+  assert.deepEqual(attempts.map(x => x.usage.inputTokens), [10, 10, 10]);
+  const diagnostics = JSON.parse(fs.readFileSync(r.summary.diagnostics, 'utf8'));
+  assert.equal(diagnostics.settings.tool_output_token_limit, 2048);
+  assert.equal(diagnostics.totals.dispatches_with_usage, 3);
+  assert.equal(diagnostics.totals.input_tokens, 30);
+  assert.deepEqual(diagnostics.outcomes, { completed: 1 });
+  assert.deepEqual(diagnostics.rounds[0].attempts.map(x => x.resumed), [false, true, true]);
   const prompts = attempts.map(x => fs.readFileSync(path.join(x.folder, 'prompt.md'), 'utf8'));
+  assert.match(prompts[0], /"paths":\["README.md"\],"next":"Next: Use the prepared selector\."/);
+  assert.doesNotMatch(prompts[1], /Discovery pointers/);
+  for (const attempt of attempts)
+    assert.ok(JSON.parse(fs.readFileSync(path.join(attempt.folder, 'server-argv.json'), 'utf8')).includes('tool_output_token_limit=2048'));
   assert.equal(new Set(prompts.map(x => x.match(/Deadline \(UTC\): (\S+)/)[1])).size, 1);
   for (const prompt of prompts) {
     const deadline = Date.parse(prompt.match(/Deadline \(UTC\): (\S+)\. Reserve/)[1]);
@@ -505,7 +553,10 @@ test('context handoffs get fresh history and retain peak and final request telem
   assert.equal(r.code, 0, r.stderr); assert.equal(taskRuns(file), 1);
   const attempts = r.summary.rounds[0].attempts;
   assert.equal(attempts.length, 2); assert.equal(attempts[0].reason, 'reported_context_limit');
-  assert.deepEqual(attempts[0].context, { last_input_tokens: 169838, peak_input_tokens: 449769, model_context_window: 475000 });
+  assert.equal(attempts[0].context.last_input_tokens, 169838);
+  assert.equal(attempts[0].context.peak_input_tokens, 449769);
+  assert.equal(attempts[0].context.model_context_window, 475000);
+  assert.equal(attempts[0].usage.inputTokens, 449769 + 169838);
   assert.equal(attempts[1].session_resumed, false);
   const rpc = fs.readFileSync(path.join(attempts[1].folder, 'rpc.jsonl'), 'utf8');
   assert.match(rpc, /thread\/start/); assert.doesNotMatch(rpc, /thread\/resume/);

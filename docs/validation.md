@@ -113,6 +113,26 @@ archive has SHA-256
 `3965991c989b05759a2e7d1f9f46c267af75ed921c673f63f8286a58d08a981a`.
 Local evidence is in `.taskmd-runner/release-0.4.1/`.
 
+## Session defaults and task run limit
+
+Build TypeScript and check CLI help and the prepared selectors for CLI defaults
+and overrides, shared continuation deadlines, short timeout handling, task run
+limits, and retry and Git publication paths that depend on the default limit.
+Confirm that the 60-minute target shares the original 90-minute budget across
+continuations and that short overrides omit the target. Reuse prior evidence
+for unchanged selection, adapter and controller behavior. Allow 45 seconds for
+the focused checks. Completion requires a clean whitespace check and all selected
+checks to pass with prepared workers.
+
+The TypeScript build, CLI help and whitespace checks passed. The runner selection
+covered CLI bounds, task run limits, provider errors, timeout and exit recovery,
+deadline steering, clarification bounds, no-progress retries and early checkpoints.
+Seventeen cases passed in the initial 66-second run. The new prompt assertion
+captured the punctuation after the deadline timestamp. After correcting the
+capture, the early-checkpoint case passed in 1.9 seconds. The four Git selectors
+for run-limit publication, pending recovery and worker exit passed in 55 seconds.
+Total focused evidence is 22 passing cases using prepared workers.
+
 ## 0.4.0 GitHub release
 
 Release scope: Roadmap Monitor reporting, runner MCP and local lane integration.
@@ -138,6 +158,32 @@ Removed the disposable `installed/` verification copy from that directory,
 reclaiming approximately 18.4 MiB. Data-volume free space remains 20 GiB.
 No release-owned runner, worker, browser or preview remained. Existing browser
 and development resources were retained.
+
+## Continue local work after Git synchronization fails
+
+Build TypeScript and run `node --test tests/git-sync.test.mjs`. The Git fixture
+suite exercises the affected pre-task and publication paths, the local Git
+lease, multiple checkouts, the explicit stop policy and dedicated resolver
+guards. Assert that a skipped sync emits one attention warning and retains
+accepted handoffs in local commits, including after a publication conflict.
+Check the patch with `git diff --check`. Allow up to one minute. The fixtures
+use local repositories and prepared worker responses.
+
+The conflict fallback uses `git merge --abort` only after confirming a clean
+pre-merge checkout and matching merge identity. It checks the branch, HEAD,
+operation state and cleanliness again before continuing. Merge commands refuse
+to overwrite ignored files and disable autostash. [Git merge documentation](https://git-scm.com/docs/git-merge)
+
+The initial Git run passed 37 cases. Its CLI assertion expected the default on
+an invocation that explicitly requested `worker`. The follow-up checks the
+default separately and reruns the CLI and merge cases affected by the two Git
+flags. It reuses the passing fetch, push, lease, and task lifecycle results
+whose fixtures never change the merge target. The detached MCP start check
+passed with explicit `git_conflicts: "skip"`.
+
+The final build and all 23 selected Git cases passed, including the ignored
+file collision. The remaining 16 Git cases reuse the initial passing results.
+Logs are under `.taskmd-runner/git-sync-fallback*.log`.
 
 ## Local lane integration before task runs
 
@@ -290,6 +336,20 @@ or persistent preview was started. Existing MCP browser controllers and the
 Assign Vite service were retained. Session evidence is under 1 MiB, the installed
 package is 2 MiB and data-volume free space is 20 GiB. No unrelated caches,
 credentials, source or retained qualification artifacts were removed.
+
+### Configured round caps
+
+Clean round caps now report a completed invocation with `round_limit` as the
+reason and `stopped` as the roadmap state. Capped runs with blocked tasks retain
+their attention items. The CLI summary reason and exit code are unchanged.
+
+The TypeScript build and five prepared checks passed using the `monitor reports`
+and `pending request cannot lose` selectors in `tests/runner.test.mjs` and
+`tests/monitor.test.mjs` (2.2 seconds of test execution, under 10 seconds
+expected). Roadmap Monitor's v1 parser, attention reconciliation and presentation
+accepted all 16 reports from the two cap scenarios and showed Completed for the
+clean cap and Needs attention for the cap with a blocker. Existing configuration,
+transport and release evidence still applies. No live inference ran.
 
 
 ## 0.3.3 GitHub release

@@ -21,6 +21,8 @@ const startSchema = z.object({
   task_prefixes: z.array(z.string()).max(64).optional(),
   timeout: z.number().int().positive().optional(),
   max_task_runs: z.number().int().positive().optional(),
+  codex_tool_output_tokens: z.number().int().positive().optional(),
+  diagnose: z.boolean().optional(),
   block_after_runs: z.number().int().positive().optional(),
   review_blockers: z.boolean().optional().describe('Review a worker-reported blocker within the current round before publishing it'),
   model: z.string().optional(), effort: z.string().optional(),
@@ -78,12 +80,13 @@ export function createRunnerMcp(self = false) {
     }, input => guarded(async () => {
       const args: string[] = [];
       const values = ['client', 'rounds', 'timeout', 'max_task_runs', 'block_after_runs', 'model', 'effort',
-        'config', 'task_dir', 'state_dir', 'permissions', 'sandbox', 'git_conflicts', 'git_integration_branch', 'taskmd', 'executable', 'notify', 'codex_session_policy', 'codex_permissions_profile'] as const;
+        'config', 'task_dir', 'state_dir', 'permissions', 'sandbox', 'git_conflicts', 'git_integration_branch', 'taskmd', 'executable', 'notify', 'codex_session_policy', 'codex_permissions_profile', 'codex_tool_output_tokens'] as const;
       for (const key of values) if (input[key] !== undefined) args.push('--' + key.replaceAll('_', '-'), String(input[key]));
       for (const [key, flag] of [['filters', '--filter'], ['task_prefixes', '--task-prefix'], ['git_repos', '--git-repo']] as const)
         for (const value of input[key] || []) args.push(flag, value);
       if (input.git_sync) args.push('--git-sync');
       if (input.review_blockers) args.push('--review-blockers');
+      if (input.diagnose) args.push('--diagnose');
       if (input.worker) args.push('--worker', ...input.worker);
       return launchRun(input.project, input.lane, args);
     }));

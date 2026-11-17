@@ -42,7 +42,8 @@ and dependency rules within each status. Task prefixes and worktree exclusions
 apply to both queries.
 
 Unfinished tasks block after five charged runs by default. Adjust the limit with
-`--max-task-runs` and `--block-after-runs`. The lower value applies. Completion or a valid PR-review
+`--max-task-runs` and `--block-after-runs`. The lower value applies. A verified
+partial slice counts as a run. Completion or a valid PR-review
 handoff on the final allowed run is accepted. At the limit, the runner records
 the blocker and requests owner review or splitting into subtasks that collectively
 preserve the original scope and acceptance criteria. This request appears in the
@@ -120,6 +121,20 @@ Workers read its requirements and latest Progress from disk using bounded reads.
 The stable worker instructions and result schema precede changing run details;
 the task body and accumulated history are not copied into each launch prompt.
 Reading files still consumes context, and cache savings depend on provider reuse.
+
+The runner uses Codex's configured tool-output handling by default.
+`--codex-tool-output-tokens N` (MCP `codex_tool_output_tokens`) is an
+experimental override that also adds bounded task pointers for fresh workers.
+Codex receipts report per-dispatch usage from cumulative thread events, with
+last and peak input retained as context diagnostics.
+
+Use `--diagnose` or MCP `diagnose: true` to write `diagnostics.json` beside
+the run summary. It records delivery outcomes, per-dispatch token coverage and
+context, and observed Codex tool calls, nonzero exits, exact repeats and shell
+output sizes. The first eight shell calls per dispatch are reported separately
+to help identify discovery overhead. Shell bytes measure app-server events.
+They do not measure retained model context. The report omits command text,
+arguments and output. Other clients retain reported usage where available.
 
 By default, Codex workers use a private `codex-home/` inside the runner's run
 directory, including when `--state-dir` is supplied. Persistent sessions and
@@ -319,10 +334,12 @@ command arguments. Setup and probes create no dashboard run or model call.
 
 Configured invocations report automatically, including custom workers. The
 dashboard shows `Taskmd · PROJECT`, task IDs/titles, rounds, validated summaries,
-blockers and terminal outcomes. An empty finished queue is completed; a round cap
-requires attention even when the CLI exits successfully. Blocked tasks remain
-visible while independent work continues. Interruptions are cancelled; unexpected
-runner failures are failed. Existing runs need restarting to adopt reporting.
+blockers and terminal outcomes. Draining the queue or reaching a configured round
+cap without blockers completes the invocation. Capped runs show “round limit”
+in the run details. Blocked tasks still require attention when a cap is reached
+and remain visible while independent work continues. Interruptions are cancelled.
+Unexpected runner failures are failed. Existing runs need restarting to adopt
+reporting.
 
 `monitor disable` / `monitor enable` preserve the connection and its identity.
 `TASKMD_MONITOR=off` disables reporting for one invocation. Environment overrides

@@ -14,9 +14,12 @@ const effort = effortConfig ? JSON.parse(effortConfig.slice(effortConfig.indexOf
 const resume = value('resume');
 const isolatedHome = process.env.TASKMD_CODEX_ISOLATED_HOME;
 const profile = process.env.TASKMD_CODEX_PERMISSIONS_PROFILE;
+const toolOutputTokens = process.env.TASKMD_CODEX_TOOL_OUTPUT_TOKENS;
+if (toolOutputTokens && !/^[1-9]\d*$/.test(toolOutputTokens)) throw new Error('Invalid Codex tool output token limit');
 const runnerMcp = process.env.TASKMD_RUNNER_SELF_ID ? ['-c', `mcp_servers.taskmd_runner={command=${JSON.stringify(process.execPath)},args=[${JSON.stringify(fileURLToPath(new URL('./taskmd-runner.js', import.meta.url)))},"mcp","--self"],env_vars=["TASKMD_RUNNER_SELF_ID","TASKMD_RUNNER_SELF_ENDPOINT","TASKMD_RUNNER_SELF_TOKEN"]}`] : [];
 const child = spawn(process.env.TASKMD_CODEX_EXECUTABLE || 'codex',
   ['app-server', '--listen', 'stdio://', '-c', 'approval_policy="never"',
+    ...(toolOutputTokens ? ['-c', `tool_output_token_limit=${toolOutputTokens}`] : []),
     ...runnerMcp,
     ...(isolatedHome ? ['-c', `sqlite_home=${JSON.stringify(isolatedHome)}`, '-c', `log_dir=${JSON.stringify(path.join(isolatedHome, 'log'))}`] : [])],
   { stdio: ['pipe', 'pipe', 'inherit'] });
@@ -25,6 +28,8 @@ const pending = new Map();
 const serverLog = fs.createWriteStream(path.join(process.env.TASKMD_ROUND_DIR, 'codex-server.jsonl'));
 let nextId = 0, threadId, turnId, finalText = '', usage, ended = false, handoffTimer, shutdownTimer;
 let peakInputTokens = 0;
+let usageBaseline, startingTurn = false;
+const usageKeys = ['inputTokens', 'outputTokens', 'cachedInputTokens'];
 const send = message => child.stdin.write(JSON.stringify(message) + '\n');
 const request = (method, params) => new Promise((resolve, reject) => {
   const id = ++nextId; pending.set(id, { resolve, reject });
@@ -65,14 +70,22 @@ const receive = message => {
   }
   const p = message.params || {};
   if (p.threadId && threadId && p.threadId !== threadId) return;
+  if (startingTurn && !turnId && message.method === 'turn/started') turnId = p.turn?.id;
   if (p.turnId && turnId && p.turnId !== turnId) return;
   if (message.method === 'item/completed' && p.item?.type === 'agentMessage') finalText = p.item.text;
-  if (message.method === 'thread/tokenUsage/updated') {
-    usage = p.tokenUsage?.last;
-    peakInputTokens = Math.max(peakInputTokens, usage?.inputTokens || 0);
+  if (message.method === 'thread/tokenUsage/updated' && turnId && p.turnId === turnId) {
+    const { last, total, modelContextWindow } = p.tokenUsage ?? {};
+    if (usageKeys.every(key => Number.isSafeInteger(total?.[key]) && total[key] >= 0) &&
+        (!resume || usageBaseline || usageKeys.every(key => Number.isSafeInteger(last?.[key]) && last[key] >= 0 && last[key] <= total[key]))) {
+      // The first update includes the first request of this dispatch. Remove
+      // only the prior history for resumed threads.
+      usageBaseline ??= Object.fromEntries(usageKeys.map(key => [key, resume ? total[key] - last[key] : 0]));
+      usage = Object.fromEntries(usageKeys.map(key => [key, total[key] - usageBaseline[key]]));
+    }
+    peakInputTokens = Math.max(peakInputTokens, last?.inputTokens || 0);
     fs.writeFileSync(path.join(process.env.TASKMD_ROUND_DIR, 'context.json'), JSON.stringify({
-      last_input_tokens: usage?.inputTokens ?? null, peak_input_tokens: peakInputTokens,
-      model_context_window: p.tokenUsage?.modelContextWindow ?? null,
+      last_input_tokens: last?.inputTokens ?? null, peak_input_tokens: peakInputTokens,
+      model_context_window: modelContextWindow ?? null, ...(usage ? { dispatch_usage: usage } : {}),
     }));
   }
   if (message.method === 'turn/completed') {
@@ -132,8 +145,10 @@ try {
     { ...config, ...(resume ? { threadId: resume, excludeTurns: true } : { ephemeral: args.includes('--ephemeral') }) });
   threadId = response.thread.id;
   emit({ type: 'thread.started', thread_id: threadId });
+  startingTurn = true;
   const turn = await request('turn/start', { threadId, input: [{ type: 'text', text: prompt, text_elements: [] }],
     ...(effort ? { effort } : {}), outputSchema: JSON.parse(fs.readFileSync(process.env.TASKMD_RESULT_SCHEMA, 'utf8')) });
   turnId = turn.turn.id;
+  startingTurn = false;
   if (!ended && process.env.TASKMD_HANDOFF_AT) handoffTimer = setTimeout(steer, Math.max(0, Number(process.env.TASKMD_HANDOFF_AT) - Date.now()));
 } catch (error) { fail(error); }

@@ -26,6 +26,8 @@ Select pending taskmd work, claim it, run one worker, validate and repeat.
   --sandbox MODE         Codex workspace-write (default) or danger-full-access
   --codex-permissions-profile NAME  Select a named Codex permissions profile
   --codex-session-policy POLICY  isolated (default) or shared desktop history
+  --codex-tool-output-tokens N  Opt-in Codex context budget per tool result
+  --diagnose             Write detailed run usage and tool statistics
   --executable PATH      Agent executable override
   --taskmd PATH          taskmd executable (default taskmd)
   --config PATH          Project config override
@@ -52,6 +54,7 @@ export function parseArgs(argv: string[]): Options {
     if (flag === '--worker') { options.worker = argv.slice(i + 1); if (!options.worker.length) throw new Error('--worker must be nonempty'); break; }
     if (flag === '--git-sync') { options.gitSync = true; continue; }
     if (flag === '--review-blockers') { options.reviewBlockers = true; continue; }
+    if (flag === '--diagnose') { options.diagnose = true; continue; }
     const value = argv[++i];
     if (value === undefined) throw new Error(`Missing value for ${flag}`);
     if (strings[flag]) Object.assign(options, { [strings[flag]]: value });
@@ -63,6 +66,7 @@ export function parseArgs(argv: string[]): Options {
       if (!value.trim()) throw new Error('Codex permissions profile must be nonempty');
       options.codexPermissionsProfile = value;
     }
+    else if (flag === '--codex-tool-output-tokens') options.codexToolOutputTokens = Number(value);
     else if (flag === '--max-task-runs') options.maxTaskRuns = Number(value);
     else if (flag === '--block-after-runs') options.blockAfterRuns = Number(value);
     else if (flag === '--timeout') options.timeout = Number(value);
@@ -84,6 +88,9 @@ export function parseArgs(argv: string[]): Options {
       options.sandbox !== 'workspace-write' || options.permissions !== 'default'))
     throw new Error('--codex-permissions-profile requires the Codex worker with default permissions and sandbox mode');
   if (options.codexSessionPolicy !== undefined && !['isolated', 'shared'].includes(options.codexSessionPolicy)) throw new Error('Invalid Codex session policy');
+  if (options.codexToolOutputTokens !== undefined &&
+      (!Number.isSafeInteger(options.codexToolOutputTokens) || options.codexToolOutputTokens <= 0 || options.client !== 'codex' || options.worker))
+    throw new Error('--codex-tool-output-tokens requires a positive integer and the Codex client');
   if (!['attention', 'off'].includes(options.notify)) throw new Error('Invalid notification policy');
   if (!['skip', 'stop', 'worker'].includes(options.gitConflicts)) throw new Error('Invalid Git conflict policy');
   if (!options.gitSync && !options.gitIntegrationBranch && (options.gitRepo.length || options.gitConflicts === 'worker')) throw new Error('--git-repo and --git-conflicts worker require --git-sync or --git-integration-branch');

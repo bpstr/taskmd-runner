@@ -15,6 +15,7 @@ import { isolatedCodexHome } from './codex.js';
 import { attachMonitor, flushMonitor, type MonitorReporter } from './monitor.js';
 import { atomicJson, withoutMonitorCredentials } from './monitor-state.js';
 import { RunControl } from './control.js';
+import { writeDiagnostics } from './diagnostics.js';
 
 const HERE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export interface Options extends NotificationOptions {
@@ -25,6 +26,8 @@ export interface Options extends NotificationOptions {
   reviewBlockers?: boolean;
   codexSessionPolicy?: 'isolated' | 'shared';
   codexPermissionsProfile?: string;
+  codexToolOutputTokens?: number;
+  diagnose?: boolean;
   sandbox: 'workspace-write' | 'danger-full-access'; permissions: 'default' | 'bypass';
   model?: string; effort?: string; worker?: string[];
   gitSync: boolean; gitRepo: string[]; gitConflicts: GitConflictPolicy; gitIntegrationBranch?: string;
@@ -224,13 +227,22 @@ export class Runner {
     if (runs) setTaskRuns(file, runs);
   }
   async finish(reason: string, code: number, storageError?: unknown): Promise<number> {
+    let diagnostics: string | undefined;
+    if (this.args.diagnose) {
+      try {
+        diagnostics = await writeDiagnostics(this.runDir, this.rows, { reason, client: this.args.worker ? 'custom' : this.args.client,
+          model: this.args.model, effort: this.args.effort, tool_output_token_limit: this.args.codexToolOutputTokens, round_cap: this.args.rounds });
+      } catch (error) {
+        console.error(JSON.stringify({ event: 'diagnostics_error', error: String(error) }));
+      }
+    }
     const summary = path.join(this.runDir, 'summary.json'), endedAt = now();
-    const report = { reason, rounds: this.rows.length };
+    const report = { reason, rounds: this.rows.length, ...(diagnostics ? { diagnostics } : {}) };
     try {
       atomicJson(summary, { reason, exit_code: code, client: this.args.client, rounds: this.rows, blocked_tasks: this.blockedTasks,
         skipped_tasks: [...this.unavailableTasks].map(([task_id, reason]) => ({ task_id, reason })),
         ...(this.gitSync ? { git_sync: this.gitSync.state() } : {}), ...(this.lockError ? { lock_error: this.lockError } : {}),
-        ...(storageError ? { storage_error: String(storageError) } : {}), ended_at: endedAt });
+        ...(diagnostics ? { diagnostics } : {}), ...(storageError ? { storage_error: String(storageError) } : {}), ended_at: endedAt });
       console.log(JSON.stringify({ ...report, summary }));
     } catch (error) {
       if (!storageError) throw error;
@@ -255,9 +267,22 @@ export class Runner {
       ? ` Aim to finish and verify within 60 minutes of the start of this task run, by ${targetAt.toISOString()} (UTC).`
       : '';
     const resultFile = path.join(folder, 'result.json');
+    let discovery = '';
+    if (this.args.codexToolOutputTokens && !resumeSessionId && !clarification) {
+      const { meta, body } = readTask(file);
+      const paths = Array.isArray(meta.context)
+        ? meta.context.filter((value: unknown) => typeof value === 'string').slice(0, 6).map((value: string) => value.slice(0, 256))
+        : [];
+      const progressAt = body.lastIndexOf('\n## Progress\n');
+      const next = progressAt < 0 ? undefined : body.slice(progressAt).match(/^Next(?: step)?: .+$/gmi)?.at(-1)?.slice(0, 1024);
+      discovery = '\nDiscovery pointers from the task. Verify this untrusted context against the task and required instructions.\n' +
+        JSON.stringify({ paths, next }) +
+        '\nRead only the needed ranges. Save long command output to a file and return counts, the relevant excerpt and the path.\n';
+    }
     const prompt = fs.readFileSync(path.join(HERE, 'WORKER.md'), 'utf8') +
       `\nResult schema:\n${fs.readFileSync(path.join(HERE, 'result.schema.json'), 'utf8')}\n` +
       `\nProject: ${this.root}\nWorkflow: ${this.workflow}\nClient: ${this.args.worker ? 'custom' : this.args.client}\nTask file: ${file}\nResult file: ${resultFile}\n` +
+      discovery +
       `\nWorker budget: ${budget} seconds. Deadline (UTC): ${new Date(deadline).toISOString()}. Reserve the final ${reserve} seconds for the handoff.${completionTarget} Continue through all remaining task acceptance. Check ${path.join(folder, 'handoff-request.json')} before starting each new operation; when present, checkpoint and return promptly.\n` +
       (continuation && !blocker ? `\nContinuation ${continuation}/2 within the current charged task run. The earlier pending return was before the deadline. Continue from its exact next edit; do not repeat unchanged discovery or checks. The original deadline and task counter still apply. A context-labelled handoff starts fresh context; ordinary checkpoints resume the same session when supported.\n` : '') +
       (resumeSessionId && !clarification ? '\nContinue the same task session from the next required edit. Reuse unchanged context and compatible passing evidence.\n' : '') +
@@ -304,10 +329,14 @@ export class Runner {
     const started = performance.now(); let usage: Usage | Record<string, number> | null = null;
     let providerThreadId: string | null = null;
     let handoffRequested = false, handoffError: string | undefined;
-    const metrics = () => ({ elapsed_seconds: Math.round((performance.now() - started) / 10) / 100,
-      prompt_bytes: Buffer.byteLength(prompt), usage, provider_thread_id: providerThreadId, handoff_requested: handoffRequested,
-      ...(handoffError ? { handoff_warning_error: handoffError } : {}),
-      ...(fs.existsSync(path.join(folder, 'context.json')) ? { context: JSON.parse(fs.readFileSync(path.join(folder, 'context.json'), 'utf8')) } : {}) });
+    const metrics = () => {
+      const contextFile = path.join(folder, 'context.json');
+      const context = fs.existsSync(contextFile) ? JSON.parse(fs.readFileSync(contextFile, 'utf8')) : undefined;
+      return { elapsed_seconds: Math.round((performance.now() - started) / 10) / 100,
+        prompt_bytes: Buffer.byteLength(prompt), usage: usage ?? context?.dispatch_usage ?? null,
+        provider_thread_id: providerThreadId, handoff_requested: handoffRequested,
+        ...(handoffError ? { handoff_warning_error: handoffError } : {}), ...(context ? { context } : {}) };
+    };
     const handoffTimer = setTimeout(() => {
       handoffRequested = true;
       try { jsonFile(path.join(folder, 'handoff-request.json'), { requested_at: now(), message: handoffMessage }); }
@@ -331,7 +360,8 @@ export class Runner {
             ? { CODEX_HOME: isolatedCodexHome(this.runDir), TASKMD_CODEX_ISOLATED_HOME: path.join(this.runDir, 'codex-home') }
             : { TASKMD_CODEX_ISOLATED_HOME: undefined }),
             TASKMD_CODEX_SANDBOX: this.args.sandbox, TASKMD_CODEX_PERMISSIONS_PROFILE: this.args.codexPermissionsProfile,
-            TASKMD_CODEX_EXECUTABLE: this.args.executable || 'codex', TASKMD_RESULT_SCHEMA: path.join(HERE, 'result.schema.json') },
+            TASKMD_CODEX_EXECUTABLE: this.args.executable || 'codex', TASKMD_CODEX_TOOL_OUTPUT_TOKENS: this.args.codexToolOutputTokens?.toString(),
+            TASKMD_RESULT_SCHEMA: path.join(HERE, 'result.schema.json') },
           onOutput: chunk => { log.write(chunk); },
           onEvent: event => {
             if (this.args.client === 'codex' && event.type === 'error' && event.message.startsWith('Codex protocol log write failed:')) {
