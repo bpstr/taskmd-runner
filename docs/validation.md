@@ -1,5 +1,20 @@
 # Runner validation
 
+## Concurrent commits on the integration branch
+
+Build with `npm run build` and run `node --test tests/git-sync.test.mjs`.
+The affected Git suite takes about one minute with prepared workers and local
+repositories. The regression adds an unrelated commit during the first round
+on `main` and checks that both task handoffs commit and the second worker sees
+the incoming change. Other fixtures preserve edits when a commit touches the
+active task or rewrites the branch. Existing Git cases cover index ownership,
+multiple repositories, push retries, and conflict handling.
+
+The build and 40 existing Git cases passed. The three added cases passed in
+2.4 seconds after fixing fixture path canonicalization and ignoring the local
+evidence directory. Reuse the existing passing cases because those fixture
+edits did not change the controller.
+
 ## 0.4.3 release
 
 Scope includes PR #5, storage recovery for issue #6, and the session defaults.

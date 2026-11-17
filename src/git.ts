@@ -64,10 +64,22 @@ export class GitSync {
       if (fs.existsSync(file)) throw new Error(`Unfinished Git operation (${name}) in ${repo}; reconcile it before starting`);
     }
   }
-  private async identity(repo: Repository) {
+  private async identity(repo: Repository, integration?: { phase: string; files: string[] }) {
     const branch = (await this.git(repo.path, 'symbolic-ref', '--short', 'HEAD')).trim();
     const head = (await this.git(repo.path, 'rev-parse', 'HEAD')).trim();
-    if (branch !== repo.branch || head !== repo.head) throw new Error(`Git branch or HEAD changed outside the controller in ${repo.path}`);
+    if (branch === repo.branch && head === repo.head) return false;
+    const changedIdentity = new Error(`Git branch or HEAD changed outside the controller in ${repo.path}`);
+    if (!integration || branch !== repo.branch || branch !== this.integrationBranch) throw changedIdentity;
+    const base = (await this.git(repo.path, 'merge-base', repo.head, head)).trim();
+    if (base !== repo.head) throw changedIdentity;
+    const incoming = split(await this.git(repo.path, 'diff', '--name-only', '--no-renames', '-z', repo.head, head, '--'));
+    const overlap = incoming.find(file => integration.files.some(owned =>
+      file === owned || file.startsWith(owned + '/') || owned.startsWith(file + '/')));
+    if (overlap) throw new Error(`Concurrent Git update overlaps the accepted handoff in ${repo.path}: ${overlap}`);
+    const previousHead = repo.head;
+    repo.head = head;
+    this.event('integration_head_adopted', repo.path, { phase: integration.phase, previous_head: previousHead, head });
+    return true;
   }
   private async requireClean(repo: Repository, phase: string) {
     await this.identity(repo);
@@ -180,7 +192,11 @@ export class GitSync {
   }
   async before(round: number) {
     // Preflight all checkouts before changing any of them.
-    for (const repo of this.repositories) await this.requireClean(repo, 'between rounds');
+    for (const repo of this.repositories) {
+      await this.operation(repo.path);
+      if ((await this.changed(repo.path)).length) throw new Error(`Git checkout became dirty between rounds: ${repo.path}`);
+      await this.identity(repo, { phase: `before round ${round}`, files: [] });
+    }
     if (this.warning) return;
     if (this.integrationBranch) for (const repo of this.repositories) {
       try { await this.git(repo.path, 'show-ref', '--verify', `refs/heads/${this.integrationBranch}`); }
@@ -198,19 +214,28 @@ export class GitSync {
       this.event('ready', repo.path, { round, head: repo.head });
     }
   }
-  async after(round: number, id: string, status: string, verify: () => Promise<void>) {
+  async after(round: number, id: string, status: string, verify: () => Promise<void>, taskFile?: string) {
+    const handoffs: { repo: Repository; files: string[] }[] = [];
+    let adopted = false;
     for (const repo of this.repositories) {
-      await this.identity(repo); await this.operation(repo.path);
+      await this.operation(repo.path);
       if ((await this.git(repo.path, 'diff', '--cached', '--name-only')).trim()) throw new Error(`Task worker changed the controller-owned Git index in ${repo.path}`);
-    }
-    for (const repo of this.repositories) {
-      await this.identity(repo);
       const files = await this.changed(repo.path);
+      const protectedFiles = taskFile && inside(repo.path, taskFile)
+        ? [taskFile, path.join(path.dirname(taskFile), '.worklogs', `${id}.md`)].map(file => path.relative(repo.path, file).split(path.sep).join('/'))
+        : [];
+      if (await this.identity(repo, { phase: `checkpoint round ${round}`, files: [...files, ...protectedFiles] })) adopted = true;
+      handoffs.push({ repo, files });
+    }
+    if (adopted) await verify();
+    for (const { repo, files } of handoffs) {
+      await this.identity(repo);
       if (files.length) {
         await this.git(repo.path, 'add', '--all', '--', ...files);
-        if ((await this.git(repo.path, 'diff', '--cached', '--name-only')).trim()) {
+        if ((await this.git(repo.path, 'diff', '--cached', '--name-only', '--', ...files)).trim()) {
           const subject = status === 'completed' ? `Complete task ${id}` : `Save progress on task ${id}`;
-          await this.git(repo.path, 'commit', '-m', subject);
+          await this.identity(repo);
+          await this.git(repo.path, 'commit', '--only', '-m', subject, '--', ...files);
           repo.head = (await this.git(repo.path, 'rev-parse', 'HEAD')).trim();
           this.event('commit', repo.path, { round, task_id: id, head: repo.head, files });
         }
