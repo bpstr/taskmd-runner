@@ -1,5 +1,13 @@
 # Runner validation
 
+## Report fatal Git synchronization errors
+
+The TypeScript build and 11 focused prepared checks passed. The Git selectors
+cover a fatal merge, recoverable publication failures and concurrent handoffs.
+The reporting selectors verify that a fatal Git error produces a stderr receipt
+pointer, a distinct desktop alert and a Monitor attention item even when another
+task is blocked. Reused evidence covers the remaining runner behaviors.
+
 ## Consolidate the runner recovery branches
 
 `npm test` covers the combined Git, worker, control, accounting and Monitor

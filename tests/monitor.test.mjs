@@ -40,6 +40,16 @@ test('projection keeps explicit task activity, redacts private data and distingu
   }
 });
 
+test('a fatal Git error gets run-level attention alongside outstanding task blockers', t => {
+  const record = fixture(t);
+  Object.assign(record, { reason: 'git_sync_error', roadmapState: 'stopped', exitCode: 1, attentionTasks: ['002'] });
+  const report = projectMonitor(record, { sequence: 0 }, true);
+  assert.equal(report.run.terminal_outcome, 'failed');
+  assert.equal(report.run.reason_code, 'git_sync_error');
+  assert.deepEqual(report.attention.map(({ task_id, reason_code, requires_attention }) =>
+    [task_id, reason_code, requires_attention]), [['002', 'blocked', true], [null, 'git_sync_error', true]]);
+});
+
 test('configuration preserves saved credentials on rejection and disabled settings override environment', async t => {
   fixture(t);
   await configureMonitor(config.endpoint, key, 'Prepared', async () => accepted());

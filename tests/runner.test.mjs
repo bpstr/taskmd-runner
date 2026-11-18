@@ -900,6 +900,11 @@ test('notifications deduplicate successful submissions and retain failed evidenc
   await alerts.send('runner.blocked', root, '001'); await alerts.send('runner.blocked', root, '001'); await alerts.send('runner.blocked', root, '001');
   assert.equal(calls, 2); await alerts.sendForReason('round_limit', root); assert.equal(calls, 3);
   assert.deepEqual(JSON.parse(fs.readFileSync(file)).deliveries.map(x => x.result), ['permission_denied', 'submitted', 'submitted']);
+  await alerts.send('runner.needs_attention', root);
+  await alerts.sendForReason('git_sync_error', root);
+  await alerts.sendForReason('git_sync_error', root);
+  assert.equal(calls, 5);
+  assert.deepEqual(JSON.parse(fs.readFileSync(file)).deliveries.slice(-2).map(x => x.event), ['runner.needs_attention', 'runner.git_sync_failed']);
   let disabledCalls = 0;
   const off = new Notifications({ notify: 'off', notifyOn: ['runner.completed'] }, file, async () => { disabledCalls++; return 'submitted'; });
   await off.sendForReason('empty', root);

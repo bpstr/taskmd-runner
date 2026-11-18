@@ -260,6 +260,14 @@ test('skips an update that would overwrite an ignored local file', async t => {
 test('explicit stop mode preserves a conflicting merge before claiming a task', async t => {
   const base = temporary(t), { repo, peer } = repository(base); tasks(repo); commit(repo); git(repo, 'push'); conflicting(repo, peer);
   const r = await run(repo, ['--git-conflicts', 'stop']); assert.equal(r.code, 1, r.stderr); assert.equal(r.summary.reason, 'git_sync_error'); assert.equal(r.summary.rounds.length, 0);
+  const alerts = r.stderr.split('\n').filter(line => line.startsWith('{"event":"git_sync_error",')).map(line => JSON.parse(line));
+  assert.equal(alerts.length, 1);
+  const [alert] = alerts;
+  assert.equal(alert.requires_attention, true);
+  assert.equal(alert.error, r.summary.git_sync.error);
+  assert.equal(alert.summary, path.join(r.directory, 'summary.json'));
+  assert.equal(alert.receipt, path.join(r.directory, 'git-sync.json'));
+  assert.ok(fs.existsSync(alert.receipt));
   assert.equal(readTask(path.join(repo, 'tasks/001-task.md')).meta.status, 'pending'); assert.ok(fs.existsSync(path.join(repo, '.git/MERGE_HEAD')));
 });
 for (const adapter of [undefined, 'grok', 'codex', 'claude']) test(`dedicated ${adapter || 'custom'} resolver reconciles conflicts before the capped task`, async t => {

@@ -459,7 +459,9 @@ publish the retained commits, or you can reconcile and push them manually.
 If upstream advances during a worker, the controller still tries to integrate
 it and retry the push once. An unfinished operation, failed conflict resolution,
 or an unsafe checkout exits with `git_sync_error` and preserves the checkout for
-reconciliation.
+reconciliation. The stderr event points to `git-sync.json` and the run summary.
+The runner submits a Git-specific desktop alert when enabled and adds a run-level
+attention item to the terminal Roadmap Monitor report.
 
 ## Worker commands and locking
 

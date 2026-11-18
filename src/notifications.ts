@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { command } from './process.js';
 
-export const notificationEvents = ['runner.blocked', 'runner.needs_attention', 'runner.stuck', 'runner.turn_limit_reached', 'runner.completed'] as const;
+export const notificationEvents = ['runner.blocked', 'runner.needs_attention', 'runner.git_sync_failed', 'runner.stuck', 'runner.turn_limit_reached', 'runner.completed'] as const;
 export type NotificationEvent = typeof notificationEvents[number];
 export interface NotificationOptions { notify: 'attention' | 'off'; notifyOn: NotificationEvent[] }
 export function notificationCommand(platform = process.platform, env = process.env): string {
@@ -18,7 +18,7 @@ export class Notifications {
   private deliveries: { event: string; task?: string; result: string; at: string }[] = [];
   constructor(private options: NotificationOptions, private file: string, private deliver: Delivery = desktopNotification) {}
   async send(event: NotificationEvent, project: string, task?: string) {
-    const attention = ['runner.blocked', 'runner.needs_attention', 'runner.stuck'].includes(event);
+    const attention = ['runner.blocked', 'runner.needs_attention', 'runner.git_sync_failed', 'runner.stuck'].includes(event);
     if (this.options.notify === 'off' || (!attention && !this.options.notifyOn.includes(event))) return;
     const key = JSON.stringify([event, project, task]);
     if (this.submitted.has(key)) return;
@@ -31,7 +31,8 @@ export class Notifications {
     catch { console.warn('Desktop notifications: notification_state_write_failed'); }
   }
   async sendForReason(reason: string, project: string, task?: string) {
-    const event: NotificationEvent = reason === 'round_limit' ? 'runner.turn_limit_reached'
+    const event: NotificationEvent = reason === 'git_sync_error' ? 'runner.git_sync_failed'
+      : reason === 'round_limit' ? 'runner.turn_limit_reached'
       : reason === 'empty' ? 'runner.completed' : reason === 'no_progress' ? 'runner.stuck'
       : reason === 'no_ready_tasks' || reason === 'unmet_dependency' ? 'runner.blocked' : 'runner.needs_attention';
     await this.send(event, project, task);
@@ -39,7 +40,8 @@ export class Notifications {
 }
 const clean = (text: string) => text.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 240);
 export async function desktopNotification(event: NotificationEvent, project: string, task?: string): Promise<string> {
-  const title = event === 'runner.stuck' ? 'Taskmd Runner is stuck'
+  const title = event === 'runner.git_sync_failed' ? 'Taskmd Runner stopped on a Git error'
+    : event === 'runner.stuck' ? 'Taskmd Runner is stuck'
     : event === 'runner.blocked' ? 'Taskmd Runner is blocked'
     : event === 'runner.completed' ? 'Taskmd Runner completed'
     : event === 'runner.turn_limit_reached' ? 'Taskmd Runner reached its round limit' : 'Taskmd Runner needs attention';

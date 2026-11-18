@@ -139,7 +139,16 @@ export function projectMonitor(
       requires_attention: true,
       recovering: !terminal && role === "resolver",
     });
-  if (
+  if (terminal && run.reason_code === "git_sync_error")
+    attention.push({
+      task_id: null,
+      source_identity: "terminal",
+      category: "review",
+      reason_code: run.reason_code,
+      requires_attention: true,
+      recovering: false,
+    });
+  else if (
     terminal &&
     ["deferred", "needs_attention"].includes(run.terminal_outcome ?? "") &&
     attention.length === 0

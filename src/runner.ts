@@ -242,6 +242,11 @@ export class Runner {
     if (runs) setTaskRuns(file, runs);
   }
   async finish(reason: string, code: number, storageError?: unknown): Promise<number> {
+    const summary = path.join(this.runDir, 'summary.json'), endedAt = now();
+    if (reason === 'git_sync_error') console.error(JSON.stringify({
+      event: 'git_sync_error', requires_attention: true, error: this.gitSync?.error,
+      receipt: path.join(this.runDir, 'git-sync.json'), summary, next_action: 'reconcile_checkout',
+    }));
     let diagnostics: string | undefined;
     if (this.args.diagnose) {
       try {
@@ -251,7 +256,6 @@ export class Runner {
         console.error(JSON.stringify({ event: 'diagnostics_error', error: String(error) }));
       }
     }
-    const summary = path.join(this.runDir, 'summary.json'), endedAt = now();
     const report = { reason, rounds: this.rows.length, ...(diagnostics ? { diagnostics } : {}) };
     try {
       atomicJson(summary, { reason, exit_code: code, client: this.args.client, rounds: this.rows, blocked_tasks: this.blockedTasks,
